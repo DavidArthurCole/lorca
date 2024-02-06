@@ -37,12 +37,25 @@ func LocateChrome() string {
 		}
 	case "windows":
 		paths = []string{
+			//Chrome
 			os.Getenv("LocalAppData") + "/Google/Chrome/Application/chrome.exe",
 			os.Getenv("ProgramFiles") + "/Google/Chrome/Application/chrome.exe",
 			os.Getenv("ProgramFiles(x86)") + "/Google/Chrome/Application/chrome.exe",
 			os.Getenv("LocalAppData") + "/Chromium/Application/chrome.exe",
 			os.Getenv("ProgramFiles") + "/Chromium/Application/chrome.exe",
 			os.Getenv("ProgramFiles(x86)") + "/Chromium/Application/chrome.exe",
+			//Opera
+			os.Getenv("LocalAppData") + "/Programs/Opera/launcher.exe",
+			os.Getenv("LocalAppData") + "/Programs/Opera/opera.exe",
+			os.Getenv("ProgramFiles") + "/Opera/launcher.exe",
+			os.Getenv("ProgramFiles") + "/Opera/opera.exe",
+			//Brave
+			os.Getenv("LocalAppData") + "/BraveSoftware/Brave-Browser/Application/brave.exe",
+			os.Getenv("ProgramFiles") + "/BraveSoftware/Brave-Browser/Application/brave.exe",
+			//Vivaldi
+			os.Getenv("LocalAppData") + "/Vivaldi/Application/vivaldi.exe",
+			os.Getenv("ProgramFiles") + "/Vivaldi/Application/vivaldi.exe",
+			//Edge
 			os.Getenv("ProgramFiles(x86)") + "/Microsoft/Edge/Application/msedge.exe",
 			os.Getenv("ProgramFiles") + "/Microsoft/Edge/Application/msedge.exe",
 		}
