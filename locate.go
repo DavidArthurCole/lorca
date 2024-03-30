@@ -21,6 +21,9 @@ func LocateChrome() string {
 	if path, ok := os.LookupEnv("LORCACHROME"); ok {
 		if _, err := os.Stat(path); err == nil {
 			return path
+		} else {
+			// If the path is not found, remove the env variable
+			os.Unsetenv("LORCACHROME")
 		}
 	}
 
@@ -32,7 +35,6 @@ func LocateChrome() string {
 			"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
 			"/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
 			"/Applications/Chromium.app/Contents/MacOS/Chromium",
-			"/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
 			"/usr/bin/google-chrome-stable",
 			"/usr/bin/google-chrome",
 			"/usr/bin/chromium",
@@ -43,6 +45,8 @@ func LocateChrome() string {
 			"/Applications/Opera.app/Contents/MacOS/Opera",
 			//Vivaldi
 			"/Applications/Vivaldi.app/Contents/MacOS/Vivaldi",
+			//Edge (why)
+			"/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
 		}
 	case "windows":
 		paths = []string{
@@ -78,6 +82,10 @@ func LocateChrome() string {
 			"/snap/bin/chromium",
 			//Opera
 			"/usr/bin/opera",
+			//Brave
+			"/usr/bin/brave-browser",
+			//Vivaldi
+			"/usr/bin/vivaldi",
 		}
 	}
 
