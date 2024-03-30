@@ -509,7 +509,12 @@ func (c *chrome) kill() error {
 			return err
 		}
 	}
-	// TODO: cancel all pending requests
+	c.Lock()
+	for _, ch := range c.pending {
+		ch <- result{Err: errors.New("chrome closed")}
+	}
+	defer c.Unlock()
+
 	if state := c.cmd.ProcessState; state == nil || !state.Exited() {
 		return c.cmd.Process.Kill()
 	}

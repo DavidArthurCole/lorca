@@ -11,6 +11,8 @@ import (
 // executable file.
 var ChromeExecutable = LocateChrome
 
+var foundPaths = []string{}
+
 // LocateChrome returns a path to the Chrome binary, or an empty string if
 // Chrome installation is not found.
 func LocateChrome() string {
@@ -26,6 +28,7 @@ func LocateChrome() string {
 	switch runtime.GOOS {
 	case "darwin":
 		paths = []string{
+			//Chrome
 			"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
 			"/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
 			"/Applications/Chromium.app/Contents/MacOS/Chromium",
@@ -34,6 +37,12 @@ func LocateChrome() string {
 			"/usr/bin/google-chrome",
 			"/usr/bin/chromium",
 			"/usr/bin/chromium-browser",
+			//Brave
+			"/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+			//Opera
+			"/Applications/Opera.app/Contents/MacOS/Opera",
+			//Vivaldi
+			"/Applications/Vivaldi.app/Contents/MacOS/Vivaldi",
 		}
 	case "windows":
 		paths = []string{
@@ -61,20 +70,44 @@ func LocateChrome() string {
 		}
 	default:
 		paths = []string{
+			//Chrome
 			"/usr/bin/google-chrome-stable",
 			"/usr/bin/google-chrome",
 			"/usr/bin/chromium",
 			"/usr/bin/chromium-browser",
 			"/snap/bin/chromium",
+			//Opera
+			"/usr/bin/opera",
 		}
 	}
 
+	var foundPath string
 	for _, path := range paths {
 		if _, err := os.Stat(path); os.IsNotExist(err) {
 			continue
 		}
-		return path
+		if foundPath == "" {
+			foundPath = path
+			foundPaths = append(foundPaths, path)
+		} else {
+			foundPaths = append(foundPaths, path)
+		}
 	}
+
+	if len(foundPaths) > 1 {
+		// Prompt user with message boxes, "ok" to select the path, "cancel" to skip to the next path
+		title := "Multiple Chromium installations found"
+		for _, path := range foundPaths {
+			text := "Chromium-based installation found:\n" + path + "\n\nWould you like to use this installation?\n\"Yes\" to use now & set ENV variable to use in future.\n\"No\" to move to the next found installation."
+			if messageBox(title, text) {
+				os.Setenv("LORCACHROME", path)
+				return path
+			}
+		}
+	} else if foundPath != "" {
+		return foundPath
+	}
+
 	return ""
 }
 

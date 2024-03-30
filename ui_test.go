@@ -94,7 +94,7 @@ func TestFunctionReturnTypes(t *testing.T) {
 	}
 	defer ui.Close()
 
-	if err := ui.Bind("noResults", func() { return }); err != nil {
+	if err := ui.Bind("noResults", func() { /* Left empty to imply return : S1023 */ }); err != nil {
 		t.Fatal(err)
 	}
 	if err := ui.Bind("oneNonNilResult", func() interface{} { return 1 }); err != nil {

@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"reflect"
 )
@@ -66,7 +65,7 @@ func New(url, dir string, width, height int, customArgs ...string) (UI, error) {
 	}
 	tmpDir := ""
 	if dir == "" {
-		name, err := ioutil.TempDir("", "lorca")
+		name, err := os.MkdirTemp("", "lorca")
 		if err != nil {
 			return nil, err
 		}

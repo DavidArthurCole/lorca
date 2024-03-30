@@ -2,7 +2,6 @@ package lorca
 
 import (
 	"fmt"
-	"io/ioutil"
 	"os"
 )
 
@@ -45,7 +44,7 @@ func PNG(url, script string, x, y, width, height int, bg uint32, scale float32) 
 }
 
 func doHeadless(url string, f func(c *chrome) ([]byte, error)) ([]byte, error) {
-	dir, err := ioutil.TempDir("", "lorca")
+	dir, err := os.MkdirTemp("", "lorca")
 	if err != nil {
 		return nil, err
 	}
