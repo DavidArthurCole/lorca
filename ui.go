@@ -51,6 +51,7 @@ var defaultChromeArgs = []string{
 	//"--enable-automation", https://github.com/zserge/lorca/issues/167
 	"--password-store=basic",
 	"--use-mock-keychain",
+	"--remote-allow-origins=*",
 }
 
 // New returns a new HTML5 UI for the given URL, user profile directory, window
