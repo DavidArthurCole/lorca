@@ -1,6 +1,7 @@
 package lorca
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"runtime"
@@ -29,12 +30,14 @@ func RefreshFoundPaths() {
 // Chrome installation is not found.
 func LocateChrome(preferPath string) string {
 
+	fmt.Print("LocateChrome\n: ", preferPath)
+
 	// If preferPath is specified and it exists
-	if preferPath != "" {
+	/*if preferPath != "" {
 		if _, err := os.Stat(preferPath); err == nil {
 			return preferPath
 		}
-	}
+	}*/
 
 	// If env variable "LORCACHROME" specified and it exists
 	if path, ok := os.LookupEnv("LORCACHROME"); ok {
@@ -105,7 +108,7 @@ func LocateChrome(preferPath string) string {
 		}
 	}
 
-	var foundPath string
+	foundPath := ""
 	for _, path := range paths {
 		if _, err := os.Stat(path); os.IsNotExist(err) {
 			continue
@@ -118,7 +121,7 @@ func LocateChrome(preferPath string) string {
 		}
 	}
 
-	return ""
+	return foundPath
 }
 
 // PromptDownload asks user if he wants to download and install Chrome, and
