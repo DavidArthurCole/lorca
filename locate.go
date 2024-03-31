@@ -33,11 +33,11 @@ func LocateChrome(preferPath string) string {
 	fmt.Print("LocateChrome\n: ", preferPath)
 
 	// If preferPath is specified and it exists
-	/*if preferPath != "" {
+	if preferPath != "" {
 		if _, err := os.Stat(preferPath); err == nil {
 			return preferPath
 		}
-	}*/
+	}
 
 	// If env variable "LORCACHROME" specified and it exists
 	if path, ok := os.LookupEnv("LORCACHROME"); ok {
