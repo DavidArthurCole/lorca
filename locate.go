@@ -11,19 +11,30 @@ import (
 // executable file.
 var ChromeExecutable = LocateChrome
 
-var foundPaths = []string{}
+var _foundPaths = []string{}
+
+func FoundPaths() []string {
+	if len(_foundPaths) == 0 {
+		LocateChrome("")
+	}
+	return _foundPaths
+}
 
 // LocateChrome returns a path to the Chrome binary, or an empty string if
 // Chrome installation is not found.
-func LocateChrome() string {
+func LocateChrome(preferPath string) string {
+
+	// If preferPath is specified and it exists
+	if preferPath != "" {
+		if _, err := os.Stat(preferPath); err == nil {
+			return preferPath
+		}
+	}
 
 	// If env variable "LORCACHROME" specified and it exists
 	if path, ok := os.LookupEnv("LORCACHROME"); ok {
 		if _, err := os.Stat(path); err == nil {
 			return path
-		} else {
-			// If the path is not found, remove the env variable
-			os.Unsetenv("LORCACHROME")
 		}
 	}
 
@@ -96,24 +107,10 @@ func LocateChrome() string {
 		}
 		if foundPath == "" {
 			foundPath = path
-			foundPaths = append(foundPaths, path)
+			_foundPaths = append(_foundPaths, path)
 		} else {
-			foundPaths = append(foundPaths, path)
+			_foundPaths = append(_foundPaths, path)
 		}
-	}
-
-	if len(foundPaths) > 1 {
-		// Prompt user with message boxes, "ok" to select the path, "cancel" to skip to the next path
-		title := "Multiple Chromium installations found"
-		for _, path := range foundPaths {
-			text := "Chromium-based installation found:\n" + path + "\n\nWould you like to use this installation?\n\"Yes\" to use now & set ENV variable to use in future.\n\"No\" to move to the next found installation."
-			if messageBox(title, text) {
-				os.Setenv("LORCACHROME", path)
-				return path
-			}
-		}
-	} else if foundPath != "" {
-		return foundPath
 	}
 
 	return ""

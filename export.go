@@ -50,7 +50,7 @@ func doHeadless(url string, f func(c *chrome) ([]byte, error)) ([]byte, error) {
 	}
 	defer os.RemoveAll(dir)
 	args := append(defaultChromeArgs, fmt.Sprintf("--user-data-dir=%s", dir), "--remote-debugging-port=0", "--headless", url)
-	chrome, err := newChromeWithArgs(ChromeExecutable(), args...)
+	chrome, err := newChromeWithArgs(ChromeExecutable(""), args...)
 	if err != nil {
 		return nil, err
 	}

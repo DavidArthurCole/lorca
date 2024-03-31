@@ -10,7 +10,7 @@ import (
 )
 
 func TestChromeEval(t *testing.T) {
-	c, err := newChromeWithArgs(ChromeExecutable(), "--user-data-dir=/tmp", "--headless", "--remote-debugging-port=0")
+	c, err := newChromeWithArgs(ChromeExecutable(""), "--user-data-dir=/tmp", "--headless", "--remote-debugging-port=0")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,7 +44,7 @@ func TestChromeEval(t *testing.T) {
 }
 
 func TestChromeLoad(t *testing.T) {
-	c, err := newChromeWithArgs(ChromeExecutable(), "--user-data-dir=/tmp", "--headless", "--remote-debugging-port=0")
+	c, err := newChromeWithArgs(ChromeExecutable(""), "--user-data-dir=/tmp", "--headless", "--remote-debugging-port=0")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,7 +70,7 @@ func TestChromeLoad(t *testing.T) {
 }
 
 func TestChromeBind(t *testing.T) {
-	c, err := newChromeWithArgs(ChromeExecutable(), "--user-data-dir=/tmp", "--headless", "--remote-debugging-port=0")
+	c, err := newChromeWithArgs(ChromeExecutable(""), "--user-data-dir=/tmp", "--headless", "--remote-debugging-port=0")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +107,7 @@ func TestChromeBind(t *testing.T) {
 }
 
 func TestChromeAsync(t *testing.T) {
-	c, err := newChromeWithArgs(ChromeExecutable(), "--user-data-dir=/tmp", "--headless", "--remote-debugging-port=0")
+	c, err := newChromeWithArgs(ChromeExecutable(""), "--user-data-dir=/tmp", "--headless", "--remote-debugging-port=0")
 	if err != nil {
 		t.Fatal(err)
 	}
