@@ -20,6 +20,11 @@ func FoundPaths() []string {
 	return _foundPaths
 }
 
+func RefreshFoundPaths() {
+	_foundPaths = []string{}
+	LocateChrome("")
+}
+
 // LocateChrome returns a path to the Chrome binary, or an empty string if
 // Chrome installation is not found.
 func LocateChrome(preferPath string) string {
