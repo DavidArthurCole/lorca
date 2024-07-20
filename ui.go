@@ -52,6 +52,7 @@ var defaultChromeArgs = []string{
 	"--password-store=basic",
 	"--use-mock-keychain",
 	"--remote-allow-origins=*",
+	"--enable-logging --v=1", // https://github.com/zserge/lorca/issues/119#issuecomment-1708958265
 }
 
 // New returns a new HTML5 UI for the given URL, user profile directory, window
@@ -76,7 +77,6 @@ func New(url, dir, preferPath string, width, height int, customArgs ...string) (
 	args = append(args, fmt.Sprintf("--user-data-dir=%s", dir))
 	args = append(args, fmt.Sprintf("--window-size=%d,%d", width, height))
 	args = append(args, customArgs...)
-	args = append(args, "--remote-debugging-port=0")
 
 	chrome, err := newChromeWithArgs(ChromeExecutable(preferPath), args...)
 	done := make(chan struct{})

@@ -1,7 +1,6 @@
 package lorca
 
 import (
-	"fmt"
 	"os"
 	"os/exec"
 	"runtime"
@@ -29,8 +28,6 @@ func RefreshFoundPaths() {
 // LocateChrome returns a path to the Chrome binary, or an empty string if
 // Chrome installation is not found.
 func LocateChrome(preferPath string) string {
-
-	fmt.Print("LocateChrome\n: ", preferPath)
 
 	// If preferPath is specified and it exists
 	if preferPath != "" {
