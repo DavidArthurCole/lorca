@@ -52,6 +52,7 @@ var defaultChromeArgs = []string{
 	"--password-store=basic",
 	"--use-mock-keychain",
 	"--remote-allow-origins=*",
+	"---enable-logging --v=1",
 }
 
 // New returns a new HTML5 UI for the given URL, user profile directory, window
