@@ -17,6 +17,7 @@ type UI interface {
 	Eval(js string) Value
 	Done() <-chan struct{}
 	Close() error
+	GetDebugPort() int
 }
 
 type ui struct {
@@ -173,4 +174,8 @@ func (u *ui) SetBounds(b Bounds) error {
 
 func (u *ui) Bounds() (Bounds, error) {
 	return u.chrome.bounds()
+}
+
+func (u *ui) GetDebugPort() int {
+	return u.chrome.debugPort
 }
