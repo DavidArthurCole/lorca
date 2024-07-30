@@ -37,14 +37,15 @@ type msg struct {
 
 type chrome struct {
 	sync.Mutex
-	cmd      *exec.Cmd
-	ws       *websocket.Conn
-	id       int32
-	target   string
-	session  string
-	window   int
-	pending  map[int]chan result
-	bindings map[string]bindingFunc
+	cmd       *exec.Cmd
+	ws        *websocket.Conn
+	id        int32
+	target    string
+	session   string
+	window    int
+	pending   map[int]chan result
+	bindings  map[string]bindingFunc
+	debugPort int
 }
 
 type browserVersion struct {
@@ -98,6 +99,7 @@ func newChromeWithArgs(chromeBinary string, args ...string) (*chrome, error) {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
+	c.debugPort = debugPort
 
 	body, err := io.ReadAll(res.Body)
 	if err != nil {

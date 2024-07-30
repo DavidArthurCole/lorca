@@ -77,7 +77,6 @@ func New(url, dir, preferPath string, width, height int, customArgs ...string) (
 	args = append(args, fmt.Sprintf("--user-data-dir=%s", dir))
 	args = append(args, fmt.Sprintf("--window-size=%d,%d", width, height))
 	args = append(args, customArgs...)
-	args = append(args, "--remote-debugging-port=0")
 
 	chrome, err := newChromeWithArgs(ChromeExecutable(preferPath), args...)
 	done := make(chan struct{})
