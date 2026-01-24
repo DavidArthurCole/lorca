@@ -16,7 +16,7 @@ import (
 	"golang.org/x/net/websocket"
 )
 
-type h = map[string]interface{}
+type h = map[string]any
 
 // Result is a struct for the resulting value of the JS expression or an error.
 type result struct {
@@ -24,7 +24,7 @@ type result struct {
 	Err   error
 }
 
-type bindingFunc func(args []json.RawMessage) (interface{}, error)
+type bindingFunc func(args []json.RawMessage) (any, error)
 
 // Msg is a struct for incoming messages (results and async events)
 type msg struct {
