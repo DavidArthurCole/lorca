@@ -37,6 +37,7 @@ type msg struct {
 
 type chrome struct {
 	sync.Mutex
+	wsMu      sync.Mutex // serializes websocket writes
 	cmd       *exec.Cmd
 	ws        *websocket.Conn
 	id        int32
@@ -395,11 +396,14 @@ func (c *chrome) send(method string, params h) (json.RawMessage, error) {
 	c.pending[int(id)] = resc
 	c.Unlock()
 
-	if err := websocket.JSON.Send(c.ws, h{
+	c.wsMu.Lock()
+	err = websocket.JSON.Send(c.ws, h{
 		"id":     int(id),
 		"method": "Target.sendMessageToTarget",
 		"params": h{"message": string(b), "sessionId": c.session},
-	}); err != nil {
+	})
+	c.wsMu.Unlock()
+	if err != nil {
 		return nil, err
 	}
 	res := <-resc
