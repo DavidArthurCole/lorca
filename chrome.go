@@ -495,8 +495,34 @@ func (c *chrome) injectScript(js string) error {
 	return err
 }
 
+// evalNoWait sends a Runtime.evaluate command without waiting for the
+// response.  The response is received by readLoop and silently dropped
+// (no entry in c.pending).  Used for fire-and-forget evals where
+// correctness is ensured by another path (e.g. addScriptToEvaluateOnNewDocument).
+func (c *chrome) evalNoWait(expr string) {
+	id := int(atomic.AddInt32(&c.id, 1))
+	b, _ := json.Marshal(h{"id": id, "method": "Runtime.evaluate", "params": h{"expression": expr, "awaitPromise": false}})
+	c.wsMu.Lock()
+	websocket.JSON.Send(c.ws, h{ //nolint:errcheck
+		"id":     id,
+		"method": "Target.sendMessageToTarget",
+		"params": h{"message": string(b), "sessionId": c.session},
+	})
+	c.wsMu.Unlock()
+}
+
 func (c *chrome) injectBinding(name string) error {
-	return c.injectScript(bindingScript(name))
+	script := bindingScript(name)
+	// Register the binding script for all future page loads (authoritative path).
+	if _, err := c.send("Page.addScriptToEvaluateOnNewDocument", h{"source": script}); err != nil {
+		return err
+	}
+	// Fire-and-forget eval on the current page.  With 50+ bindings registered
+	// at startup, blocking on each eval adds up.  The addScriptToEvaluateOnNewDocument
+	// above ensures the binding is installed on the next navigation; this eval
+	// is only a convenience for the currently-loaded page.
+	c.evalNoWait(script)
+	return nil
 }
 
 func contains(arr []string, x string) bool {
