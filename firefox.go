@@ -646,7 +646,7 @@ func (f *firefox) load(url string) error {
 	_, err := f.send("browsingContext.navigate", h{
 		"url":     url,
 		"context": f.context,
-		"wait":    "complete",
+		"wait":    "none",
 	})
 	return err
 }
@@ -713,14 +713,19 @@ func (f *firefox) injectBinding(name string) error {
 	f.loadScripts = append(f.loadScripts, code)
 	f.Unlock()
 
-	// Eval immediately on the current page (installs on whatever page is
-	// currently displayed; post-load re-eval handles future navigations).
-	log.Printf("lorca/firefox injectBinding(%s) eval", name)
-	_, err := f.eval(code)
-	if err != nil {
-		log.Printf("lorca/firefox injectBinding(%s) eval error: %v", name, err)
-	}
-	return err
+	// Fire-and-forget immediate eval on the current page so the binding is
+	// available right away without blocking the caller for a round trip.
+	// With 50+ bindings registered at startup, blocking evals add up to
+	// 10+ seconds of lag.  Errors are silently dropped; realmCreated /
+	// browsingContext.load provide authoritative re-installation on every
+	// navigation.
+	f.sendNoWait("script.evaluate", h{
+		"expression":      code,
+		"awaitPromise":    false,
+		"target":          h{"context": f.context},
+		"resultOwnership": "none",
+	})
+	return nil
 }
 
 func (f *firefox) setBounds(b Bounds) error {
