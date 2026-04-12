@@ -11,42 +11,35 @@ import (
 	"golang.org/x/net/websocket"
 )
 
+// bootstrapTemplate is injected as both a preload script (for future pages)
+// and run immediately via script.evaluate (for the current page).
+//
+// Firefox's script.addPreloadScript runs in a sandbox realm isolated from the
+// page realm. Assigning sandbox-realm functions to window.* properties causes
+// "Permission denied to access property 'length'" when page code (e.g. the
+// WebSocket internals or Vue) tries to introspect those functions via Xray.
+//
+// new window.Function(...) does NOT fix this — the resulting function still
+// belongs to the sandbox realm because Function realm is determined by the
+// call site, not the constructor's origin.
+//
+// window.eval("...") DOES fix it: window.eval is the page's own eval (accessed
+// via Xray from sandbox), and code it evaluates runs in the page realm. All
+// function assignments are therefore done through window.eval so the resulting
+// functions are page-realm objects. Primitive and object assignments
+// (WebSocket, Map, Array, boolean) can stay in sandbox because those values
+// are created from page-realm constructors and are accessible from both sides.
 const bootstrapTemplate = `(function() {
-  const _ws = new WebSocket('ws://127.0.0.1:__RELAY_PORT__')
-  const _pending = new Map()
-  var _sendQueue = []
-  var _open = false
-  function _send(msg) {
-    if (_open) { _ws.send(msg) } else { _sendQueue.push(msg) }
-  }
-  _ws.onopen = function() {
-    _open = true
-    for (var i = 0; i < _sendQueue.length; i++) { _ws.send(_sendQueue[i]) }
-    _sendQueue = []
-  }
-  function _register(name) {
-    window[name] = function(...args) {
-      return new Promise(function(resolve, reject) {
-        const seq = (window[name]._seq = (window[name]._seq || 0) + 1)
-        _pending.set(name + ':' + seq, {resolve: resolve, reject: reject})
-        _send(JSON.stringify({name: name, seq: seq, args: args}))
-      })
-    }
-    window[name]._seq = 0
-  }
-  _ws.onmessage = function(e) {
-    const msg = JSON.parse(e.data)
-    if (msg.type === 'register') {
-      _register(msg.name)
-    } else if (msg.type === 'result') {
-      const cb = _pending.get(msg.name + ':' + msg.seq)
-      if (cb) {
-        if (msg.error) { cb.reject(new Error(msg.error)) } else { cb.resolve(msg.result) }
-        _pending.delete(msg.name + ':' + msg.seq)
-      }
-    }
-  }
-  window.__lorcaRegister = _register
+  var _proto = window.location && window.location.protocol
+  if (_proto && _proto !== 'http:' && _proto !== 'https:' && _proto !== 'data:') { return }
+  window.__lorcaWS = new window.WebSocket('ws://127.0.0.1:__RELAY_PORT__')
+  window.__lorcaPending = new window.Map()
+  window.__lorcaQueue = new window.Array()
+  window.__lorcaOpen = false
+  window.eval("window.__lorcaSend = function(msg) { if (window.__lorcaOpen) { window.__lorcaWS.send(msg) } else { window.__lorcaQueue.push(msg) } }")
+  window.eval("window.__lorcaWS.onopen = function() { window.__lorcaOpen = true; for (var i = 0; i < window.__lorcaQueue.length; i++) { window.__lorcaWS.send(window.__lorcaQueue[i]) } window.__lorcaQueue = [] }")
+  window.eval("window.__lorcaRegister = function(name) { window[name] = function() { var args = Array.prototype.slice.call(arguments); var seq = (window[name]._seq = (window[name]._seq || 0) + 1); return new Promise(function(resolve, reject) { window.__lorcaPending.set(name + ':' + seq, {resolve: resolve, reject: reject}); window.__lorcaSend(JSON.stringify({name: name, seq: seq, args: args})); }); }; window[name]._seq = 0; }")
+  window.eval("window.__lorcaWS.onmessage = function(e) { var msg = JSON.parse(e.data); if (msg.type === 'register') { window.__lorcaRegister(msg.name); } else if (msg.type === 'result') { var cb = window.__lorcaPending.get(msg.name + ':' + msg.seq); if (cb) { if (msg.error) { cb.reject(new Error(msg.error)); } else { cb.resolve(msg.result); } window.__lorcaPending.delete(msg.name + ':' + msg.seq); } } }")
 })()`
 
 type relay struct {

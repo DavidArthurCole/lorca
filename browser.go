@@ -9,7 +9,8 @@ type browserImpl interface {
 	load(url string) error
 	bounds() (Bounds, error)
 	setBounds(Bounds) error
-	injectScript(js string) error // registers script for all future docs + runs on current page
+	injectScript(js string) error   // registers script for all future docs + runs on current page
+	injectBinding(name string) error // like injectScript but avoids cross-realm calls for Firefox
 	kill()
 	done() <-chan struct{}
 }

@@ -517,12 +517,50 @@ func (f *firefox) load(url string) error {
 func (f *firefox) injectScript(js string) error {
 	_, err := f.send("script.addPreloadScript", h{
 		"functionDeclaration": "() => { " + js + " }",
-		"contexts":            []string{f.context},
 	})
 	if err != nil {
 		return err
 	}
 	_, err = f.eval(js)
+	return err
+}
+
+// firefoxBindingScript returns the raw JS that creates window[name] as a
+// binding function. The code uses only single-quoted strings so it can be
+// safely embedded inside window.eval("...") where the outer delimiter is a
+// double quote. No double quotes appear in the returned string.
+//
+// new window.Function() is NOT used: even with the page-realm constructor, the
+// resulting function runs in the sandbox realm (realm is determined by call
+// site). window.eval (used in injectBinding) evaluates code in page realm,
+// which is where the function must live so that page code can call it without
+// hitting "Permission denied to access property 'length'".
+func firefoxBindingScript(name string) string {
+	body := `var args = Array.prototype.slice.call(arguments); ` +
+		`var seq = (window['` + name + `']._seq = (window['` + name + `']._seq || 0) + 1); ` +
+		`return new Promise(function(resolve, reject) { ` +
+		`window.__lorcaPending.set('` + name + `:' + seq, {resolve: resolve, reject: reject}); ` +
+		`window.__lorcaSend(JSON.stringify({name: '` + name + `', seq: seq, args: args})); ` +
+		`});`
+	return `window['` + name + `'] = function() { ` + body + ` }; window['` + name + `']._seq = 0;`
+}
+
+func (f *firefox) injectBinding(name string) error {
+	code := firefoxBindingScript(name)
+	// Preload runs in sandbox realm. window.eval("...") is the page's own eval
+	// (accessed via Xray); code it evaluates runs in page realm, so the binding
+	// function lands in page realm and page code can call it without Permission
+	// Denied. code contains only single-quoted strings, safe inside eval("...").
+	preload := `window.eval("` + code + `")`
+	_, err := f.send("script.addPreloadScript", h{
+		"functionDeclaration": "() => { " + preload + " }",
+	})
+	if err != nil {
+		return err
+	}
+	// f.eval (script.evaluate with target:{context}) already runs in page realm;
+	// pass the raw code directly without an extra window.eval wrapper.
+	_, err = f.eval(code)
 	return err
 }
 

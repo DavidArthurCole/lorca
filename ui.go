@@ -229,7 +229,7 @@ func (u *ui) Bind(name string, f interface{}) error {
 	// bound functions are available synchronously before any page JS runs,
 	// avoiding the race where a page mounts before the relay WebSocket has
 	// delivered its register messages.
-	return u.browser.injectScript(fmt.Sprintf(`window.__lorcaRegister('%s')`, name))
+	return u.browser.injectBinding(name)
 }
 
 func (u *ui) Eval(js string) Value {

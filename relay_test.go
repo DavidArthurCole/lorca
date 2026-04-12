@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -233,5 +234,54 @@ func TestRelayRebind(t *testing.T) {
 	}
 	if v := called.Load(); v != 2 {
 		t.Fatalf("expected called=2, got %d", v)
+	}
+}
+
+// TestBootstrapNoSandboxRealmFunctions guards against regressing to
+// new window.Function. Under Firefox's BiDi preload sandbox, new window.Function
+// creates a function whose realm is determined by the call site (the sandbox),
+// not by the constructor's origin. Page code then throws "Permission denied to
+// access property 'length'" when it inspects those sandbox-realm functions via
+// Firefox's Xray wrapper — breaking WebSocket event dispatch and binding calls.
+// window.eval("...") is the correct fix: it evaluates code in the page realm.
+func TestBootstrapNoSandboxRealmFunctions(t *testing.T) {
+	if strings.Contains(bootstrapTemplate, "new window.Function") {
+		t.Error("bootstrapTemplate must not use new window.Function: functions created " +
+			"this way run in the preload sandbox realm, not page realm. " +
+			"Use window.eval(\"...\") instead.")
+	}
+	if strings.Contains(bootstrapTemplate, "new Function(") {
+		t.Error("bootstrapTemplate must not use bare new Function(...): same sandbox-realm issue. " +
+			"Use window.eval(\"...\") instead.")
+	}
+}
+
+// TestBootstrapEvalStringsQuoteSafe verifies that every window.eval("...") call
+// in the bootstrap has no embedded double quotes in its argument. A double quote
+// inside the argument would terminate the JS string literal early, producing a
+// syntax error when Firefox compiles the preload function declaration.
+func TestBootstrapEvalStringsQuoteSafe(t *testing.T) {
+	found := 0
+	for i, line := range strings.Split(bootstrapTemplate, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, `window.eval("`) {
+			continue
+		}
+		found++
+		if !strings.HasSuffix(trimmed, `")`) {
+			t.Errorf("line %d: window.eval call does not end with \")\"", i+1)
+			continue
+		}
+		// Strip window.eval(" prefix and ") suffix to get the argument.
+		inner := trimmed[len(`window.eval("`): len(trimmed)-2]
+		if strings.Contains(inner, `"`) {
+			t.Errorf("line %d: window.eval argument contains an embedded double quote "+
+				"(would break the JS string literal in the preload function declaration):\n%s",
+				i+1, trimmed)
+		}
+	}
+	if found == 0 {
+		t.Error("no window.eval calls found in bootstrapTemplate; " +
+			"the bootstrap must use window.eval for all function assignments")
 	}
 }
