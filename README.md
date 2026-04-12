@@ -1,6 +1,6 @@
 # Lorca
 
-[![Build Status](https://img.shields.io/github/workflow/status/DavidArthurCole/lorca/CI%20Pipeline)](https://github.com/DavidArthurCole/lorca)
+[![Build Status](https://img.shields.io/github/actions/workflow/status/DavidArthurCole/lorca/ci.yml?branch=master)](https://github.com/DavidArthurCole/lorca)
 [![GoDoc](https://godoc.org/github.com/DavidArthurCole/lorca?status.svg)](https://godoc.org/github.com/DavidArthurCole/lorca)
 [![Go Report Card](https://goreportcard.com/badge/github.com/DavidArthurCole/lorca)](https://goreportcard.com/report/github.com/DavidArthurCole/lorca)
 
