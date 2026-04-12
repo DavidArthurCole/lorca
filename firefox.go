@@ -259,14 +259,23 @@ func (c *bidiConn) Close() error {
 
 type firefox struct {
 	sync.Mutex
-	cmd        *exec.Cmd
-	bidi       *bidiConn
-	id         int32
-	context    string // WebDriver BiDi browsing context ID
-	pending    map[int]chan result
-	doneC      chan struct{}
-	lastBounds Bounds
-	debugPort  int
+	cmd         *exec.Cmd
+	bidi        *bidiConn
+	id          int32
+	context     string // WebDriver BiDi browsing context ID
+	pending     map[int]chan result
+	doneC       chan struct{}
+	doneOnce    sync.Once
+	lastBounds  Bounds
+	debugPort   int
+	loadScripts []string // scripts re-eval'd in page realm on every browsingContext.load
+}
+
+// closeDone closes doneC exactly once.  It is called by readLoop on exit so
+// that callers blocking on Done() are unblocked when the BiDi connection drops
+// (i.e. when the real Firefox process closes), not when the launcher stub exits.
+func (f *firefox) closeDone() {
+	f.doneOnce.Do(func() { close(f.doneC) })
 }
 
 func newFirefoxWithArgs(binary string, args ...string) (*firefox, error) {
@@ -389,8 +398,28 @@ func newFirefoxWithArgs(binary string, args ...string) (*firefox, error) {
 	}
 
 	f.doneC = make(chan struct{})
-	go func() { f.cmd.Wait(); close(f.doneC) }()
+	go func() {
+		err := f.cmd.Wait()
+		// On Windows, firefox.exe is a launcher stub: it starts the real Firefox
+		// child process and exits immediately (exit 0).  cmd.Wait() therefore
+		// returns at once, long before the UI is ready.  We do NOT close doneC
+		// here; it is closed by readLoop when the BiDi connection drops, which
+		// correctly reflects when the real Firefox process is gone.
+		log.Printf("lorca/firefox: launcher process exited err=%v state=%v", err, f.cmd.ProcessState)
+	}()
 	go f.readLoop()
+
+	// readLoop is now running; f.send can safely be used.
+	// Subscribe to console logs, navigation events, and realm creation for diagnostics.
+	if _, err := f.send("session.subscribe", h{"events": []string{
+		"log.entryAdded",
+		"browsingContext.navigationStarted",
+		"browsingContext.load",
+		"browsingContext.contextDestroyed",
+		"script.realmCreated",
+	}}); err != nil {
+		log.Printf("lorca/firefox: session.subscribe failed: %v", err)
+	}
 
 	return f, nil
 }
@@ -425,22 +454,71 @@ type bidiMsg struct {
 }
 
 func (f *firefox) readLoop() {
+	// Signal doneC when the BiDi connection drops.  This is the authoritative
+	// signal that Firefox is gone: on Windows the cmd.Wait() goroutine fires
+	// immediately (launcher stub exits), so we cannot rely on it.
+	defer f.closeDone()
 	for {
 		var m bidiMsg
 		if err := f.bidi.Receive(&m); err != nil {
+			log.Printf("lorca/firefox: readLoop exiting: %v", err)
 			return
 		}
 		if m.Method != "" {
-			// Event — check for context destruction.
-			if m.Method == "browsingContext.contextDestroyed" {
+			switch m.Method {
+			case "browsingContext.contextDestroyed":
+				log.Printf("lorca/firefox contextDestroyed raw: %s", string(m.Params))
 				params := struct {
 					Context string `json:"context"`
 				}{}
 				json.Unmarshal(m.Params, &params)
 				if params.Context == f.context {
+					log.Printf("lorca/firefox: main context destroyed — killing")
 					f.kill()
 					return
 				}
+			case "log.entryAdded":
+				log.Printf("lorca/firefox log.entryAdded raw: %s", string(m.Params))
+			case "browsingContext.navigationStarted":
+				log.Printf("lorca/firefox navigationStarted raw: %s", string(m.Params))
+			case "browsingContext.load":
+				log.Printf("lorca/firefox load raw: %s", string(m.Params))
+				// Re-eval all binding scripts in the page window realm.  Preloads fire
+				// earlier but in a sandbox realm, producing sandbox-realm function objects
+				// that cause "Permission denied to access property 'length'" when page-realm
+				// code (e.g. Vue) introspects them.  f.eval targets the page window realm,
+				// so re-running each binding script after load replaces the sandbox-realm
+				// functions with page-realm equivalents.
+				//
+				// We only do this for the main browsing context (f.context) and only when
+				// the params carry that context ID.  A goroutine is used because f.eval
+				// calls f.send which blocks waiting for readLoop to deliver the response —
+				// calling it inline here would deadlock.
+				var loadParams struct {
+					Context string `json:"context"`
+				}
+				json.Unmarshal(m.Params, &loadParams)
+				if loadParams.Context == f.context {
+					f.Lock()
+					scripts := append([]string(nil), f.loadScripts...)
+					f.Unlock()
+					if len(scripts) > 0 {
+						go func(scripts []string) {
+							log.Printf("lorca/firefox: re-evaling %d binding script(s) in page realm", len(scripts))
+							for i, s := range scripts {
+								log.Printf("lorca/firefox: re-eval [%d/%d]", i+1, len(scripts))
+								if _, err := f.eval(s); err != nil {
+									log.Printf("lorca/firefox: post-load eval error [%d]: %v", i+1, err)
+								}
+							}
+							log.Printf("lorca/firefox: post-load re-eval complete")
+						}(scripts)
+					}
+				}
+			case "script.realmCreated":
+				log.Printf("lorca/firefox realmCreated raw: %s", string(m.Params))
+			default:
+				log.Printf("lorca/firefox: unhandled event %s: %s", m.Method, string(m.Params))
 			}
 			continue
 		}
@@ -514,53 +592,98 @@ func (f *firefox) load(url string) error {
 	return err
 }
 
+// scriptElementInject returns a self-contained JS snippet (suitable as a
+// preload functionDeclaration body) that injects code as a <script> element.
+// Script elements execute in the page realm, not the preload sandbox realm,
+// which avoids "Permission denied to access property 'length'" Xray errors
+// when page-realm code later introspects the resulting functions.
+//
+// Firefox fires script.addPreloadScript callbacks before the HTML parser has
+// created the <html> element (document.documentElement is null at that point).
+// We therefore use a MutationObserver to detect the moment <html> is added to
+// the document, then append the <script> synchronously from the observer
+// callback.  The observer callback fires before any deferred/module page
+// scripts execute, so binding functions are in the page realm by the time
+// frameworks like Vue inspect them.
+//
+// The snippet also handles the direct-eval path (document.documentElement
+// already exists when f.eval runs it on the current page).
+func scriptElementInject(code string) string {
+	encoded, _ := json.Marshal(code)
+	return `(function(){` +
+		`var inject=function(){` +
+		`var s=document.createElement('script');` +
+		`s.text=` + string(encoded) + `;` +
+		`(document.head||document.documentElement).appendChild(s);` +
+		`};` +
+		`if(document.documentElement){` +
+		`inject();` +
+		`}else if(typeof MutationObserver!=='undefined'){` +
+		`var obs=new MutationObserver(function(){` +
+		`if(document.documentElement){obs.disconnect();inject();}` +
+		`});` +
+		`obs.observe(document,{childList:true});` +
+		`}` +
+		`})()`
+}
+
 func (f *firefox) injectScript(js string) error {
+	preview := js
+	if len(preview) > 120 {
+		preview = preview[:120] + "..."
+	}
+	// Wrap the script in a <script> element injection so it runs in the page
+	// realm (not the BiDi preload sandbox realm). Page-realm objects avoid
+	// "Permission denied to access property 'length'" Xray errors when
+	// page-realm code (e.g. Vue) introspects the resulting functions.
+	injector := scriptElementInject(js)
+	log.Printf("lorca/firefox injectScript addPreloadScript (via script element): %s", preview)
 	_, err := f.send("script.addPreloadScript", h{
-		"functionDeclaration": "() => { " + js + " }",
+		"functionDeclaration": "() => { " + injector + " }",
 	})
 	if err != nil {
+		log.Printf("lorca/firefox injectScript addPreloadScript error: %v", err)
 		return err
 	}
+	log.Printf("lorca/firefox injectScript eval: %s", preview)
 	_, err = f.eval(js)
+	if err != nil {
+		log.Printf("lorca/firefox injectScript eval error: %v", err)
+	}
 	return err
 }
 
-// firefoxBindingScript returns the raw JS that creates window[name] as a
-// binding function. The code uses only single-quoted strings so it can be
-// safely embedded inside window.eval("...") where the outer delimiter is a
-// double quote. No double quotes appear in the returned string.
-//
-// new window.Function() is NOT used: even with the page-realm constructor, the
-// resulting function runs in the sandbox realm (realm is determined by call
-// site). window.eval (used in injectBinding) evaluates code in page realm,
-// which is where the function must live so that page code can call it without
-// hitting "Permission denied to access property 'length'".
-func firefoxBindingScript(name string) string {
-	body := `var args = Array.prototype.slice.call(arguments); ` +
-		`var seq = (window['` + name + `']._seq = (window['` + name + `']._seq || 0) + 1); ` +
-		`return new Promise(function(resolve, reject) { ` +
-		`window.__lorcaPending.set('` + name + `:' + seq, {resolve: resolve, reject: reject}); ` +
-		`window.__lorcaSend(JSON.stringify({name: '` + name + `', seq: seq, args: args})); ` +
-		`});`
-	return `window['` + name + `'] = function() { ` + body + ` }; window['` + name + `']._seq = 0;`
-}
-
 func (f *firefox) injectBinding(name string) error {
-	code := firefoxBindingScript(name)
-	// Preload runs in sandbox realm. window.eval("...") is the page's own eval
-	// (accessed via Xray); code it evaluates runs in page realm, so the binding
-	// function lands in page realm and page code can call it without Permission
-	// Denied. code contains only single-quoted strings, safe inside eval("...").
-	preload := `window.eval("` + code + `")`
+	code := bindingScript(name)
+
+	// Wrap the binding script in a <script> element injection so it runs in
+	// the page realm (not the BiDi preload sandbox realm).  Page-realm
+	// functions do not trigger "Permission denied to access property 'length'"
+	// Xray errors when page-realm code (e.g. Vue) introspects them.
+	injector := scriptElementInject(code)
+	log.Printf("lorca/firefox injectBinding(%s) addPreloadScript (via script element)", name)
 	_, err := f.send("script.addPreloadScript", h{
-		"functionDeclaration": "() => { " + preload + " }",
+		"functionDeclaration": "() => { " + injector + " }",
 	})
 	if err != nil {
+		log.Printf("lorca/firefox injectBinding(%s) addPreloadScript error: %v", name, err)
 		return err
 	}
-	// f.eval (script.evaluate with target:{context}) already runs in page realm;
-	// pass the raw code directly without an extra window.eval wrapper.
+
+	// Store for post-load re-eval (readLoop browsingContext.load handler) as a
+	// belt-and-suspenders fallback for navigations where the script element
+	// injection might not fire early enough.
+	f.Lock()
+	f.loadScripts = append(f.loadScripts, code)
+	f.Unlock()
+
+	// Eval immediately on the current page (mirrors what the preload does for
+	// future navigations — ensures the binding exists before any navigation).
+	log.Printf("lorca/firefox injectBinding(%s) eval", name)
 	_, err = f.eval(code)
+	if err != nil {
+		log.Printf("lorca/firefox injectBinding(%s) eval error: %v", name, err)
+	}
 	return err
 }
 
@@ -602,6 +725,7 @@ func (f *firefox) bounds() (Bounds, error) {
 }
 
 func (f *firefox) kill() {
+	log.Printf("lorca/firefox: kill() called")
 	if f.bidi != nil {
 		f.bidi.Close()
 	}

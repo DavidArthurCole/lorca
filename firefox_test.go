@@ -187,8 +187,8 @@ func TestFirefoxSetBounds(t *testing.T) {
 // Pure-Go structural tests — no browser required
 // ---------------------------------------------------------------------------
 
-// TestFirefoxBindingScriptInvariants checks properties of the JS produced by
-// firefoxBindingScript without starting a browser. Three invariants must hold:
+// TestBindingScriptInvariants checks properties of the JS produced by
+// bindingScript without starting a browser. Three invariants must hold:
 //
 //  1. No double quotes in the output — the code is embedded as the argument to
 //     window.eval("...") inside the preload functionDeclaration string; a double
@@ -202,10 +202,10 @@ func TestFirefoxSetBounds(t *testing.T) {
 //  3. The function body references window.__lorcaPending and window.__lorcaSend,
 //     the page-realm state set up by the bootstrap, so calls are routed through
 //     the relay.
-func TestFirefoxBindingScriptInvariants(t *testing.T) {
+func TestBindingScriptInvariants(t *testing.T) {
 	for _, name := range []string{"add", "getPlayerData", "myBinding123", "x"} {
 		t.Run(name, func(t *testing.T) {
-			code := firefoxBindingScript(name)
+			code := bindingScript(name)
 
 			if strings.Contains(code, `"`) {
 				t.Errorf("output contains double quotes; must be safely embeddable "+

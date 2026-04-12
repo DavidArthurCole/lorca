@@ -256,32 +256,16 @@ func TestBootstrapNoSandboxRealmFunctions(t *testing.T) {
 	}
 }
 
-// TestBootstrapEvalStringsQuoteSafe verifies that every window.eval("...") call
-// in the bootstrap has no embedded double quotes in its argument. A double quote
-// inside the argument would terminate the JS string literal early, producing a
-// syntax error when Firefox compiles the preload function declaration.
-func TestBootstrapEvalStringsQuoteSafe(t *testing.T) {
-	found := 0
-	for i, line := range strings.Split(bootstrapTemplate, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if !strings.HasPrefix(trimmed, `window.eval("`) {
-			continue
-		}
-		found++
-		if !strings.HasSuffix(trimmed, `")`) {
-			t.Errorf("line %d: window.eval call does not end with \")\"", i+1)
-			continue
-		}
-		// Strip window.eval(" prefix and ") suffix to get the argument.
-		inner := trimmed[len(`window.eval("`): len(trimmed)-2]
-		if strings.Contains(inner, `"`) {
-			t.Errorf("line %d: window.eval argument contains an embedded double quote "+
-				"(would break the JS string literal in the preload function declaration):\n%s",
-				i+1, trimmed)
-		}
-	}
-	if found == 0 {
-		t.Error("no window.eval calls found in bootstrapTemplate; " +
-			"the bootstrap must use window.eval for all function assignments")
+// TestBootstrapNoWindowEval guards against re-introducing window.eval into the
+// bootstrap template.  window.eval() was tried (Approach 4) to escape the
+// Firefox BiDi preload sandbox realm, but confirmed not to work: functions
+// created via window.eval from a sandbox still run in the sandbox realm and
+// cause "Permission denied to access property 'length'" when page-realm code
+// introspects them.  The bootstrap must NOT use window.eval.
+func TestBootstrapNoWindowEval(t *testing.T) {
+	if strings.Contains(bootstrapTemplate, `window.eval(`) {
+		t.Error("bootstrapTemplate must not use window.eval(): it does not escape " +
+			"the Firefox preload sandbox realm (Approach 4, confirmed non-fix). " +
+			"Use bindingScript injection via injectBinding instead.")
 	}
 }

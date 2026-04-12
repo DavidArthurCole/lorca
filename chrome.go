@@ -496,7 +496,7 @@ func (c *chrome) injectScript(js string) error {
 }
 
 func (c *chrome) injectBinding(name string) error {
-	return c.injectScript(fmt.Sprintf(`window.__lorcaRegister('%s')`, name))
+	return c.injectScript(bindingScript(name))
 }
 
 func contains(arr []string, x string) bool {

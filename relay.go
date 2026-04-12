@@ -3,6 +3,7 @@ package lorca
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"strings"
@@ -11,35 +12,49 @@ import (
 	"golang.org/x/net/websocket"
 )
 
-// bootstrapTemplate is injected as both a preload script (for future pages)
-// and run immediately via script.evaluate (for the current page).
+// bindingScript returns the JS that installs window[name] as a relay-backed
+// binding function.  The generated code references window.__lorcaPending and
+// window.__lorcaSend, both of which are set up by the bootstrap.  It is safe
+// to inject in any realm (Chrome page realm via Page.addScriptToEvaluateOnNewDocument,
+// or Firefox page realm via script.evaluate / post-load re-eval).
+func bindingScript(name string) string {
+	body := `var args = Array.prototype.slice.call(arguments); ` +
+		`var seq = (window['` + name + `']._seq = (window['` + name + `']._seq || 0) + 1); ` +
+		`return new Promise(function(resolve, reject) { ` +
+		`window.__lorcaPending.set('` + name + `:' + seq, {resolve: resolve, reject: reject}); ` +
+		`window.__lorcaSend(JSON.stringify({name: '` + name + `', seq: seq, args: args})); ` +
+		`});`
+	return `window['` + name + `'] = function() { ` + body + ` }; window['` + name + `']._seq = 0;`
+}
+
+// bootstrapTemplate is the JS code injected into every page to set up the
+// relay WebSocket and the lorca messaging primitives.
 //
-// Firefox's script.addPreloadScript runs in a sandbox realm isolated from the
-// page realm. Assigning sandbox-realm functions to window.* properties causes
-// "Permission denied to access property 'length'" when page code (e.g. the
-// WebSocket internals or Vue) tries to introspect those functions via Xray.
+// For the preload path (script.addPreloadScript in firefox.go) this template
+// is NOT used directly inside the sandboxed functionDeclaration — instead
+// firefox.go wraps it in a <script> element injection so the code runs in the
+// page realm rather than the preload sandbox realm.  Running in the sandbox
+// realm causes "Permission denied to access property 'length'" whenever
+// page-realm code (e.g. Vue) introspects the resulting functions via Xray.
 //
-// new window.Function(...) does NOT fix this — the resulting function still
-// belongs to the sandbox realm because Function realm is determined by the
-// call site, not the constructor's origin.
+// window.eval() and new window.Function() do NOT fix this; both still produce
+// sandbox-realm objects because realm membership is determined by the call
+// site, not the constructor origin.  Only code executed as a DOM <script>
+// element is guaranteed to belong to the page realm.
 //
-// window.eval("...") DOES fix it: window.eval is the page's own eval (accessed
-// via Xray from sandbox), and code it evaluates runs in the page realm. All
-// function assignments are therefore done through window.eval so the resulting
-// functions are page-realm objects. Primitive and object assignments
-// (WebSocket, Map, Array, boolean) can stay in sandbox because those values
-// are created from page-realm constructors and are accessible from both sides.
+// For the script.evaluate path (f.eval in firefox.go) the template runs
+// directly in the page window realm, so no wrapper is needed there either.
 const bootstrapTemplate = `(function() {
   var _proto = window.location && window.location.protocol
   if (_proto && _proto !== 'http:' && _proto !== 'https:' && _proto !== 'data:') { return }
-  window.__lorcaWS = new window.WebSocket('ws://127.0.0.1:__RELAY_PORT__')
-  window.__lorcaPending = new window.Map()
-  window.__lorcaQueue = new window.Array()
+  if (_proto !== 'data:') { var _orig = window.location.origin; if (!_orig || _orig === 'null') { return } }
+  window.__lorcaWS = new WebSocket('ws://127.0.0.1:__RELAY_PORT__')
+  window.__lorcaPending = new Map()
+  window.__lorcaQueue = []
   window.__lorcaOpen = false
-  window.eval("window.__lorcaSend = function(msg) { if (window.__lorcaOpen) { window.__lorcaWS.send(msg) } else { window.__lorcaQueue.push(msg) } }")
-  window.eval("window.__lorcaWS.onopen = function() { window.__lorcaOpen = true; for (var i = 0; i < window.__lorcaQueue.length; i++) { window.__lorcaWS.send(window.__lorcaQueue[i]) } window.__lorcaQueue = [] }")
-  window.eval("window.__lorcaRegister = function(name) { window[name] = function() { var args = Array.prototype.slice.call(arguments); var seq = (window[name]._seq = (window[name]._seq || 0) + 1); return new Promise(function(resolve, reject) { window.__lorcaPending.set(name + ':' + seq, {resolve: resolve, reject: reject}); window.__lorcaSend(JSON.stringify({name: name, seq: seq, args: args})); }); }; window[name]._seq = 0; }")
-  window.eval("window.__lorcaWS.onmessage = function(e) { var msg = JSON.parse(e.data); if (msg.type === 'register') { window.__lorcaRegister(msg.name); } else if (msg.type === 'result') { var cb = window.__lorcaPending.get(msg.name + ':' + msg.seq); if (cb) { if (msg.error) { cb.reject(new Error(msg.error)); } else { cb.resolve(msg.result); } window.__lorcaPending.delete(msg.name + ':' + msg.seq); } } }")
+  window.__lorcaSend = function(msg) { if (window.__lorcaOpen) { window.__lorcaWS.send(msg) } else { window.__lorcaQueue.push(msg) } }
+  window.__lorcaWS.onopen = function() { window.__lorcaOpen = true; for (var i = 0; i < window.__lorcaQueue.length; i++) { window.__lorcaWS.send(window.__lorcaQueue[i]) } window.__lorcaQueue = [] }
+  window.__lorcaWS.onmessage = function(e) { var msg = JSON.parse(e.data); if (msg.type === 'result') { var cb = window.__lorcaPending.get(msg.name + ':' + msg.seq); if (cb) { if (msg.error) { cb.reject(new Error(msg.error)); } else { cb.resolve(msg.result); } window.__lorcaPending.delete(msg.name + ':' + msg.seq); } } }
 })()`
 
 type relay struct {
@@ -107,8 +122,10 @@ func (r *relay) handleClient(ws *websocket.Conn) {
 	r.mu.Lock()
 	old := r.client
 	r.client = ws
+	log.Printf("lorca/relay: page connected, replaying %d binding(s)", len(r.names))
 	for _, name := range r.names {
 		if err := websocket.JSON.Send(ws, map[string]string{"type": "register", "name": name}); err != nil {
+			log.Printf("lorca/relay: send register(%s) failed: %v", name, err)
 			r.mu.Unlock()
 			if old != nil {
 				old.Close()
@@ -138,12 +155,15 @@ func (r *relay) handleClient(ws *websocket.Conn) {
 	for {
 		var call callMsg
 		if err := websocket.JSON.Receive(ws, &call); err != nil {
+			log.Printf("lorca/relay: client read error (disconnect?): %v", err)
 			break
 		}
+		log.Printf("lorca/relay: call %s seq=%d", call.Name, call.Seq)
 		r.mu.Lock()
 		f, ok := r.bindings[call.Name]
 		r.mu.Unlock()
 		if !ok {
+			log.Printf("lorca/relay: no binding for %q", call.Name)
 			continue
 		}
 		name, seq, args := call.Name, call.Seq, call.Args
