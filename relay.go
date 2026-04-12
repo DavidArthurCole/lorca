@@ -60,6 +60,7 @@ const bootstrapTemplate = `(function() {
   var _proto = window.location && window.location.protocol
   if (_proto && _proto !== 'http:' && _proto !== 'https:' && _proto !== 'data:') { return }
   if (_proto !== 'data:') { var _orig = window.location.origin; if (!_orig || _orig === 'null') { return } }
+  if (window.__lorcaWS && window.__lorcaWS.readyState <= 1) { return }
   window.__lorcaWS = new WebSocket('ws://127.0.0.1:__RELAY_PORT__')
   window.__lorcaPending = new Map()
   window.__lorcaQueue = []

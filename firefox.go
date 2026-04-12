@@ -494,17 +494,13 @@ func (f *firefox) readLoop() {
 				log.Printf("lorca/firefox navigationStarted raw: %s", string(m.Params))
 			case "browsingContext.load":
 				log.Printf("lorca/firefox load raw: %s", string(m.Params))
-				// Re-eval all binding scripts in the page window realm.  Preloads fire
-				// earlier but in a sandbox realm, producing sandbox-realm function objects
-				// that cause "Permission denied to access property 'length'" when page-realm
-				// code (e.g. Vue) introspects them.  f.eval targets the page window realm,
-				// so re-running each binding script after load replaces the sandbox-realm
-				// functions with page-realm equivalents.
+				// Re-eval all scripts (bootstrap first, then bindings) in the page
+				// window realm via a single script.evaluate call.  f.eval targets the
+				// page window realm via target:{context}, creating page-realm objects.
+				// Combining into one call avoids 50+ round-trips and is faster.
 				//
-				// We only do this for the main browsing context (f.context) and only when
-				// the params carry that context ID.  A goroutine is used because f.eval
-				// calls f.send which blocks waiting for readLoop to deliver the response -
-				// calling it inline here would deadlock.
+				// A goroutine is used because f.eval calls f.send which blocks waiting
+				// for readLoop to deliver the response - calling it inline would deadlock.
 				var loadParams struct {
 					Context string `json:"context"`
 				}
@@ -515,52 +511,40 @@ func (f *firefox) readLoop() {
 					f.Unlock()
 					if len(scripts) > 0 {
 						go func(scripts []string) {
-							log.Printf("lorca/firefox: re-evaling %d binding script(s) in page realm", len(scripts))
-							for i, s := range scripts {
-								log.Printf("lorca/firefox: re-eval [%d/%d]", i+1, len(scripts))
-								if _, err := f.eval(s); err != nil {
-									log.Printf("lorca/firefox: post-load eval error [%d]: %v", i+1, err)
-								}
+							combined := strings.Join(scripts, "\n")
+							log.Printf("lorca/firefox: post-load re-eval %d script(s) in page realm", len(scripts))
+							if _, err := f.eval(combined); err != nil {
+								log.Printf("lorca/firefox: post-load eval error: %v", err)
+							} else {
+								log.Printf("lorca/firefox: post-load re-eval complete")
 							}
-							log.Printf("lorca/firefox: post-load re-eval complete")
 						}(scripts)
 					}
 				}
 			case "script.realmCreated":
 				log.Printf("lorca/firefox realmCreated raw: %s", string(m.Params))
 				// When the real-origin window realm (origin != null) is created for
-				// our context, immediately send all binding scripts as a single
-				// script.evaluate -without spawning a goroutine or waiting for a
-				// response.
+				// our context, immediately send all loadScripts (bootstrap first, then
+				// bindings) as a single script.evaluate, without spawning a goroutine
+				// or waiting for a response.
 				//
-				// Rationale: preloads fire in sandbox realm (Xray), so binding functions
-				// installed by them cause "Permission denied to access property 'length'"
-				// when page-realm code (Vue) introspects them.  script.evaluate targets
-				// the page realm and creates page-realm functions.
+				// loadScripts contains all scripts that must run in the page window realm
+				// on every page load: the bootstrap (window.__lorcaWS etc.) followed by
+				// the binding functions.  Since no preloads are registered, none of these
+				// objects are sandbox-realm - they are only ever created by script.evaluate
+				// with target:{context}, which always resolves to the page window realm.
 				//
-				// We send it here in readLoop (no goroutine) so it is queued in the
-				// BiDi send buffer immediately, before readLoop continues processing.
-				// The module bundle must still be fetched over localhost before Vue can
-				// run, giving us a window of several milliseconds for our evaluate to
-				// be queued ahead of Vue's module scripts.
+				// We send here (no goroutine) so the evaluate is queued in the BiDi
+				// send buffer immediately.  The module bundle must still be fetched over
+				// localhost before Vue runs, giving us a window to get ahead.
 				//
-				// Post-load re-eval (browsingContext.load handler) remains as
-				// belt-and-suspenders in case this race is lost.
+				// Post-load re-eval (browsingContext.load handler) is the unconditional
+				// fallback if this race is lost.
 				//
-				// IMPORTANT: We must skip preload sandbox realm events.  When
-				// script.addPreloadScript is registered, Firefox fires realmCreated for
-				// the sandbox realm with type="window" and the real page origin -the
-				// same fields as a true window realm.  Using that sandbox realm's realm
-				// ID as the script.evaluate target would install binding functions in the
-				// sandbox realm, making them sandbox-realm functions that trigger
-				// "Permission denied to access property 'length'" in page-realm code.
-				//
-				// The WebDriver BiDi spec includes an optional "sandbox" field on
-				// WindowRealmInfo that is set for preload sandbox realms.  We skip events
-				// that carry a non-empty sandbox field.  As an additional guard we always
-				// use target:{context} rather than target:{realm}, so even if Firefox
-				// omits the sandbox field the evaluate lands in the context's default
-				// (page window) realm, not the sandbox.
+				// NOTE: No script.addPreloadScript is registered anywhere in this code
+				// path, so there are no preload sandbox realms to worry about.  The
+				// Sandbox check below is a safety guard in case addPreloadScript is
+				// added in the future.
 				var realmParams struct {
 					Realm   string `json:"realm"`
 					Origin  string `json:"origin"`
@@ -578,7 +562,7 @@ func (f *firefox) readLoop() {
 					f.Unlock()
 					if len(scripts) > 0 {
 						combined := strings.Join(scripts, "\n")
-						log.Printf("lorca/firefox: realmCreated realm=%s firing %d binding(s) early (no-wait)", realmParams.Realm, len(scripts))
+						log.Printf("lorca/firefox: realmCreated realm=%s firing %d script(s) early (no-wait)", realmParams.Realm, len(scripts))
 						f.sendNoWait("script.evaluate", h{
 							"expression":      combined,
 							"awaitPromise":    false,
@@ -667,63 +651,37 @@ func (f *firefox) load(url string) error {
 	return err
 }
 
-// scriptElementInject returns a self-contained JS snippet (suitable as a
-// preload functionDeclaration body) that injects code as a <script> element.
-//
-// This is used for the relay bootstrap (window.__lorcaWS, __lorcaSend, etc.)
-// which needs to run early so the WebSocket connection is available before the
-// page scripts execute.  The bootstrap only creates internal lorca variables
-// that Vue never puts into reactive state, so the sandbox-realm Xray issue
-// does not apply to it.
-//
-// NOTE: This function must NOT be used for binding functions (window[name]).
-// All code paths that produce functions introspectable by page-realm code
-// (e.g. Vue reactivity) must be installed via script.evaluate (f.eval) or the
-// post-load re-eval mechanism, not via preloads.  Confirmed dead ends from
-// BiDi preload sandbox:
-//   - window.eval(), new window.Function() -still sandbox-realm
-//   - exportFunction -not available in BiDi preloads
-//   - document.write -replaces the document, aborts browsingContext.navigate
-//   - <script> element append (direct or via MutationObserver) -also sandbox-realm
-func scriptElementInject(code string) string {
-	encoded, _ := json.Marshal(code)
-	return `(function(){` +
-		`var inject=function(){` +
-		`var s=document.createElement('script');` +
-		`s.text=` + string(encoded) + `;` +
-		`(document.head||document.documentElement).appendChild(s);` +
-		`};` +
-		`if(document.documentElement){` +
-		`inject();` +
-		`}else if(typeof MutationObserver!=='undefined'){` +
-		`var obs=new MutationObserver(function(){` +
-		`if(document.documentElement){obs.disconnect();inject();}` +
-		`});` +
-		`obs.observe(document,{childList:true});` +
-		`}` +
-		`})()`
-}
-
 func (f *firefox) injectScript(js string) error {
 	preview := js
 	if len(preview) > 120 {
 		preview = preview[:120] + "..."
 	}
-	// Wrap the script in a <script> element injection so it runs in the page
-	// realm (not the BiDi preload sandbox realm). Page-realm objects avoid
-	// "Permission denied to access property 'length'" Xray errors when
-	// page-realm code (e.g. Vue) introspects the resulting functions.
-	injector := scriptElementInject(js)
-	log.Printf("lorca/firefox injectScript addPreloadScript (via script element): %s", preview)
-	_, err := f.send("script.addPreloadScript", h{
-		"functionDeclaration": "() => { " + injector + " }",
-	})
-	if err != nil {
-		log.Printf("lorca/firefox injectScript addPreloadScript error: %v", err)
-		return err
-	}
+	// Do NOT register this script via script.addPreloadScript.  Preload scripts
+	// run in a BiDi sandbox realm, and ALL objects created there — including
+	// bootstrap objects like window.__lorcaWS, window.__lorcaWS.onopen, and
+	// window.__lorcaWS.onmessage — are sandbox-realm objects.  If app code (e.g.
+	// Vue's reactivity system) puts any of those objects into a reactive context
+	// and checks .length on the event handler functions, Firefox throws
+	// "Permission denied to access property 'length'" via Xray.
+	//
+	// Confirmed dead ends:
+	//   - script.addPreloadScript directly — sandbox-realm
+	//   - <script> element appended from preload sandbox — also sandbox-realm
+	//   - window.eval(), new window.Function() from preload — sandbox-realm
+	//   - exportFunction — not available in BiDi preloads
+	//   - document.write — aborts browsingContext.navigate with "Address rejected"
+	//
+	// Instead, store the script in loadScripts.  It will be re-evaluated in the
+	// page window realm on every realmCreated / browsingContext.load event, which
+	// fires early enough to win the race against page scripts most of the time,
+	// and is unconditionally correct after page load completes.
+	f.Lock()
+	// Prepend so this script runs before any binding scripts (binding scripts
+	// reference window.__lorcaWS etc. which must exist first).
+	f.loadScripts = append([]string{js}, f.loadScripts...)
+	f.Unlock()
 	log.Printf("lorca/firefox injectScript eval: %s", preview)
-	_, err = f.eval(js)
+	_, err := f.eval(js)
 	if err != nil {
 		log.Printf("lorca/firefox injectScript eval error: %v", err)
 	}
@@ -737,25 +695,18 @@ func (f *firefox) injectBinding(name string) error {
 	// scripts run in a BiDi sandbox realm isolated from the page realm via
 	// Firefox's Xray wrappers.  Any function objects created in that sandbox
 	// cause "Permission denied to access property 'length'" when page-realm
-	// code (e.g. Vue's reactivity system) introspects them -even through a
-	// <script> element appended from the sandbox (also sandbox-realm per
-	// confirmed testing).
+	// code (e.g. Vue's reactivity system) introspects them.  This applies even
+	// to <script> elements appended from the sandbox (also sandbox-realm per
+	// confirmed testing) and to the bootstrap itself.
 	//
-	// Leaving window[name] undefined during page load means Vue initialises
-	// cleanly; it does not introspect undefined values.  Two mechanisms then
-	// install page-realm binding functions after the preload phase:
-	//
-	//   1. script.realmCreated handler (readLoop): fires sendNoWait as soon as
-	//      the real-origin window realm is created -wins the race vs Vue when
-	//      timing allows, silently loses when it doesn't (Vue still sees
-	//      undefined, no error).
-	//
-	//   2. browsingContext.load handler (readLoop): post-load re-eval that
-	//      installs page-realm functions unconditionally after every navigation.
-	//
-	// The sandbox-realm bootstrap (window.__lorcaWS, __lorcaSend, etc.) is
-	// fine to leave as-is: those are lorca-internal variables that Vue never
-	// puts into reactive state, so Xray property access is never triggered.
+	// Binding scripts are stored in loadScripts (alongside the bootstrap, which
+	// is stored there by injectScript).  They are installed in page-realm by two
+	// mechanisms:
+	//   1. script.realmCreated handler: fires sendNoWait for all loadScripts
+	//      as soon as the real-origin window realm is created.  Wins the race vs
+	//      Vue most of the time; if it loses, Vue sees undefined (no error).
+	//   2. browsingContext.load handler: unconditional page-realm eval of all
+	//      loadScripts after every page load (belt-and-suspenders).
 
 	// Store for both realmCreated early-eval and post-load re-eval.
 	f.Lock()
