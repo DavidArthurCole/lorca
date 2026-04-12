@@ -46,6 +46,7 @@ type chrome struct {
 	window    int
 	pending   map[int]chan result
 	debugPort int
+	doneC     chan struct{}
 }
 
 type browserVersion struct {
@@ -66,7 +67,7 @@ func getFreePort() (int, error) {
 	return ln.Addr().(*net.TCPAddr).Port, nil
 }
 
-func newChromeWithArgs(chromeBinary string, bootstrapScript string, args ...string) (*chrome, error) {
+func newChromeWithArgs(chromeBinary string, args ...string) (*chrome, error) {
 	// The first two IDs are used internally during the initialization
 	c := &chrome{
 		id:      2,
@@ -133,7 +134,10 @@ func newChromeWithArgs(chromeBinary string, bootstrapScript string, args ...stri
 		c.kill()
 		return nil, err
 	}
+	c.doneC = make(chan struct{})
+	go func() { c.cmd.Wait(); close(c.doneC) }()
 	go c.readLoop()
+
 	for method, args := range map[string]h{
 		"Page.enable":          nil,
 		"Target.setAutoAttach": {"autoAttach": true, "waitForDebuggerOnStart": false},
@@ -145,20 +149,6 @@ func newChromeWithArgs(chromeBinary string, bootstrapScript string, args ...stri
 	} {
 		if _, err := c.send(method, args); err != nil {
 			c.kill()
-			c.cmd.Wait()
-			return nil, err
-		}
-	}
-
-	if bootstrapScript != "" {
-		if _, err := c.send("Page.addScriptToEvaluateOnNewDocument", h{"source": bootstrapScript}); err != nil {
-			c.kill()
-			c.cmd.Wait()
-			return nil, err
-		}
-		if _, err := c.eval(bootstrapScript); err != nil {
-			c.kill()
-			c.cmd.Wait()
 			return nil, err
 		}
 	}
@@ -167,7 +157,6 @@ func newChromeWithArgs(chromeBinary string, bootstrapScript string, args ...stri
 		win, err := c.getWindowForTarget(c.target)
 		if err != nil {
 			c.kill()
-			c.cmd.Wait()
 			return nil, err
 		}
 		c.window = win.WindowID
@@ -480,22 +469,30 @@ func (c *chrome) png(x, y, width, height int, bg uint32, scale float32) ([]byte,
 	return pdf.Data, err
 }
 
-func (c *chrome) kill() error {
+func (c *chrome) kill() {
 	if c.ws != nil {
-		if err := c.ws.Close(); err != nil {
-			return err
-		}
+		c.ws.Close()
 	}
 	c.Lock()
 	for _, ch := range c.pending {
 		ch <- result{Err: errors.New("chrome closed")}
 	}
-	defer c.Unlock()
+	c.pending = map[int]chan result{}
+	c.Unlock()
 
 	if state := c.cmd.ProcessState; state == nil || !state.Exited() {
-		return killProcessTree(c.cmd.Process.Pid)
+		killProcessTree(c.cmd.Process.Pid)
 	}
-	return nil
+}
+
+func (c *chrome) done() <-chan struct{} { return c.doneC }
+
+func (c *chrome) injectScript(js string) error {
+	if _, err := c.send("Page.addScriptToEvaluateOnNewDocument", h{"source": js}); err != nil {
+		return err
+	}
+	_, err := c.eval(js)
+	return err
 }
 
 func contains(arr []string, x string) bool {

@@ -3,10 +3,43 @@ package lorca
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
+func TestChromeInjectScript(t *testing.T) {
+	c, err := newChromeWithArgs(ChromeExecutable(""), "--user-data-dir=/tmp", "--headless", "--remote-debugging-port=0", "--remote-allow-origins=*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.kill()
+	if err := c.injectScript(`window.__injected = 42`); err != nil {
+		t.Fatal(err)
+	}
+	result, err := c.eval(`window.__injected`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(result) != `42` {
+		t.Fatalf("expected 42, got %s", result)
+	}
+}
+
+func TestChromeDone(t *testing.T) {
+	c, err := newChromeWithArgs(ChromeExecutable(""), "--user-data-dir=/tmp", "--headless", "--remote-debugging-port=0", "--remote-allow-origins=*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.kill()
+	select {
+	case <-c.done():
+		// ok — channel closed after kill
+	case <-time.After(5 * time.Second):
+		t.Fatal("done() channel did not close within 5s after kill")
+	}
+}
+
 func TestChromeEval(t *testing.T) {
-	c, err := newChromeWithArgs(ChromeExecutable(""), "", "--user-data-dir=/tmp", "--headless", "--remote-debugging-port=0", "--remote-allow-origins=*")
+	c, err := newChromeWithArgs(ChromeExecutable(""), "--user-data-dir=/tmp", "--headless", "--remote-debugging-port=0", "--remote-allow-origins=*")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,7 +73,7 @@ func TestChromeEval(t *testing.T) {
 }
 
 func TestChromeLoad(t *testing.T) {
-	c, err := newChromeWithArgs(ChromeExecutable(""), "", "--user-data-dir=/tmp", "--headless", "--remote-debugging-port=0", "--remote-allow-origins=*")
+	c, err := newChromeWithArgs(ChromeExecutable(""), "--user-data-dir=/tmp", "--headless", "--remote-debugging-port=0", "--remote-allow-origins=*")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	"strings"
 )
 
 // UI interface allows talking to the HTML5 UI from Go.
@@ -21,10 +22,9 @@ type UI interface {
 }
 
 type ui struct {
-	chrome *chrome
-	relay  *relay
-	done   chan struct{}
-	tmpDir string
+	browser browserImpl
+	relay   *relay
+	tmpDir  string
 }
 
 var defaultChromeArgs = []string{
@@ -58,13 +58,22 @@ var defaultChromeArgs = []string{
 	"--enable-logging --v=1",
 }
 
-// New returns a new HTML5 UI for the given URL, user profile directory, window
-// size and other options passed to the browser engine. If URL is an empty
-// string - a blank page is displayed. If user profile directory is an empty
-// string - a temporary directory is created and it will be removed on
-// ui.Close(). You might want to use "--headless" custom CLI argument to test
-// your UI code.
-func New(url, dir, preferPath string, width, height int, customArgs ...string) (UI, error) {
+// BrowserHint tells NewWithBrowser which browser backend to use.
+type BrowserHint string
+
+const (
+	// BrowserAuto selects the backend by inspecting the resolved binary path.
+	BrowserAuto BrowserHint = "auto"
+	// BrowserChrome selects the Chromium-family CDP backend.
+	BrowserChrome BrowserHint = "chrome"
+	// BrowserFirefox selects the Firefox WebDriver BiDi backend.
+	BrowserFirefox BrowserHint = "firefox"
+)
+
+// NewWithBrowser is like New but lets the caller specify which browser backend
+// to use. hint == BrowserAuto inspects the resolved binary name; a path
+// containing "firefox" (case-insensitive) selects the Firefox backend.
+func NewWithBrowser(url, dir, preferPath string, width, height int, hint BrowserHint, customArgs ...string) (UI, error) {
 	if url == "" {
 		url = "data:text/html,<html></html>"
 	}
@@ -82,34 +91,76 @@ func New(url, dir, preferPath string, width, height int, customArgs ...string) (
 		return nil, err
 	}
 
-	args := append(defaultChromeArgs, fmt.Sprintf("--app=%s", url))
-	args = append(args, fmt.Sprintf("--user-data-dir=%s", dir))
-	args = append(args, fmt.Sprintf("--window-size=%d,%d", width, height))
-	args = append(args, customArgs...)
+	// Resolve binary and select backend.
+	var binary string
+	useFirefox := false
+	switch hint {
+	case BrowserFirefox:
+		binary = LocateFirefox(preferPath)
+		if binary == "" {
+			r.close()
+			return nil, errors.New("lorca: no Firefox binary found")
+		}
+		useFirefox = true
+	default: // BrowserChrome or BrowserAuto
+		binary = ChromeExecutable(preferPath)
+		if hint == BrowserAuto {
+			useFirefox = strings.Contains(strings.ToLower(binary), "firefox")
+		}
+	}
 
-	chrome, err := newChromeWithArgs(ChromeExecutable(preferPath), r.bootstrapScript(), args...)
+	var browser browserImpl
+	if useFirefox {
+		args := append(append([]string{}, defaultFirefoxArgs...),
+			"--profile", dir,
+			fmt.Sprintf("--window-size=%d,%d", width, height),
+		)
+		args = append(args, customArgs...)
+		args = append(args, url)
+		browser, err = newFirefoxWithArgs(binary, args...)
+	} else {
+		args := append(append([]string{}, defaultChromeArgs...),
+			fmt.Sprintf("--app=%s", url),
+			fmt.Sprintf("--user-data-dir=%s", dir),
+			fmt.Sprintf("--window-size=%d,%d", width, height),
+		)
+		args = append(args, customArgs...)
+		browser, err = newChromeWithArgs(binary, args...)
+	}
 	if err != nil {
 		r.close()
 		return nil, err
 	}
 
-	done := make(chan struct{})
-	go func() {
-		chrome.cmd.Wait()
-		close(done)
-	}()
-	return &ui{chrome: chrome, relay: r, done: done, tmpDir: tmpDir}, nil
+	if err := browser.injectScript(r.bootstrapScript()); err != nil {
+		r.close()
+		browser.kill()
+		<-browser.done()
+		return nil, err
+	}
+
+	return &ui{browser: browser, relay: r, tmpDir: tmpDir}, nil
+}
+
+// New returns a new HTML5 UI for the given URL, user profile directory, window
+// size and other options passed to the browser engine. If URL is an empty
+// string - a blank page is displayed. If user profile directory is an empty
+// string - a temporary directory is created and it will be removed on
+// ui.Close(). You might want to use "--headless" custom CLI argument to test
+// your UI code.
+func New(url, dir, preferPath string, width, height int, customArgs ...string) (UI, error) {
+	return NewWithBrowser(url, dir, preferPath, width, height, BrowserAuto, customArgs...)
 }
 
 func (u *ui) Done() <-chan struct{} {
-	return u.done
+	return u.browser.done()
 }
 
 func (u *ui) Close() error {
 	u.relay.close()
-	// ignore err, as the chrome process might be already dead, when user close the window.
-	u.chrome.kill()
-	<-u.done
+	// ignore err, as the browser process might be already dead, when user closes the window.
+	u.browser.kill()
+	<-u.browser.done()
 	if u.tmpDir != "" {
 		if err := os.RemoveAll(u.tmpDir); err != nil {
 			return err
@@ -118,7 +169,7 @@ func (u *ui) Close() error {
 	return nil
 }
 
-func (u *ui) Load(url string) error { return u.chrome.load(url) }
+func (u *ui) Load(url string) error { return u.browser.load(url) }
 
 func (u *ui) Bind(name string, f interface{}) error {
 	v := reflect.ValueOf(f)
@@ -176,23 +227,30 @@ func (u *ui) Bind(name string, f interface{}) error {
 	// Install the binding in the current page context immediately so callers
 	// can Eval the binding right after Bind returns, without waiting for the
 	// relay WebSocket register message to be processed asynchronously.
-	_, err := u.chrome.eval(fmt.Sprintf(`window.__lorcaRegister('%s')`, name))
+	_, err := u.browser.eval(fmt.Sprintf(`window.__lorcaRegister('%s')`, name))
 	return err
 }
 
 func (u *ui) Eval(js string) Value {
-	v, err := u.chrome.eval(js)
+	v, err := u.browser.eval(js)
 	return value{err: err, raw: v}
 }
 
 func (u *ui) SetBounds(b Bounds) error {
-	return u.chrome.setBounds(b)
+	return u.browser.setBounds(b)
 }
 
 func (u *ui) Bounds() (Bounds, error) {
-	return u.chrome.bounds()
+	return u.browser.bounds()
 }
 
 func (u *ui) GetDebugPort() int {
-	return u.chrome.debugPort
+	switch b := u.browser.(type) {
+	case *chrome:
+		return b.debugPort
+	case *firefox:
+		return b.debugPort
+	default:
+		return 0
+	}
 }

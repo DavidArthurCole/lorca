@@ -3,6 +3,7 @@ package lorca
 import (
 	"errors"
 	"math/rand"
+	"os"
 	"strconv"
 	"testing"
 )
@@ -148,5 +149,42 @@ func TestFunctionReturnTypes(t *testing.T) {
 	}
 	if v := ui.Eval(`twoResultsBothNil()`); v.Err() != nil {
 		t.Fatal(v)
+	}
+}
+
+func TestNewWithBrowserChrome(t *testing.T) {
+	ui, err := NewWithBrowser("", "", "", 480, 320, BrowserChrome, "--headless")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ui.Close()
+	if n := ui.Eval(`2+3`).Int(); n != 5 {
+		t.Fatalf("expected 5, got %d", n)
+	}
+}
+
+func TestNewWithBrowserAuto(t *testing.T) {
+	ui, err := NewWithBrowser("", "", "", 480, 320, BrowserAuto, "--headless")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ui.Close()
+	if n := ui.Eval(`2+3`).Int(); n != 5 {
+		t.Fatalf("expected 5, got %d", n)
+	}
+}
+
+func TestNewWithBrowserFirefox(t *testing.T) {
+	ffPath, ok := os.LookupEnv("LORCAFIREFOX")
+	if !ok || ffPath == "" {
+		t.Skip("LORCAFIREFOX not set")
+	}
+	ui, err := NewWithBrowser("", "", ffPath, 480, 320, BrowserFirefox, "--headless")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ui.Close()
+	if n := ui.Eval(`2+3`).Int(); n != 5 {
+		t.Fatalf("expected 5, got %d", n)
 	}
 }
