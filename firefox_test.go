@@ -184,17 +184,17 @@ func TestFirefoxSetBounds(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Pure-Go structural tests — no browser required
+// Pure-Go structural tests -no browser required
 // ---------------------------------------------------------------------------
 
 // TestBindingScriptInvariants checks properties of the JS produced by
 // bindingScript without starting a browser. Three invariants must hold:
 //
-//  1. No double quotes in the output — the code is embedded as the argument to
+//  1. No double quotes in the output -the code is embedded as the argument to
 //     window.eval("...") inside the preload functionDeclaration string; a double
 //     quote would close the outer JS string and produce a syntax error.
 //
-//  2. Binding is created as a plain function expression, not via new Function —
+//  2. Binding is created as a plain function expression, not via new Function -
 //     new Function called from the preload sandbox produces a sandbox-realm
 //     function, which causes "Permission denied to access property 'length'"
 //     when page code (Vue, WebSocket internals) tries to call it.
@@ -240,8 +240,8 @@ func TestBindingScriptInvariants(t *testing.T) {
 				t.Errorf("output does not reference window.__lorcaQueue.push:\n%s", code)
 			}
 
-			// Wrapping in window.eval("...") must add exactly two double quotes —
-			// the delimiters — and no others from the code itself.
+			// Wrapping in window.eval("...") must add exactly two double quotes -
+			// the delimiters -and no others from the code itself.
 			wrapped := `window.eval("` + code + `")`
 			if n := strings.Count(wrapped, `"`); n != 2 {
 				t.Errorf("wrapped code has %d double quotes, want 2 (the window.eval delimiters only)", n)
@@ -251,13 +251,13 @@ func TestBindingScriptInvariants(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Firefox integration tests — require LORCAFIREFOX env var
+// Firefox integration tests -require LORCAFIREFOX env var
 // ---------------------------------------------------------------------------
 
-// TestFirefoxBootstrapFunctionsPageRealm verifies that the bootstrap's
-// window.eval approach creates page-realm functions. It checks that .length is
-// readable on each handler from page-realm code (script.evaluate). When
-// functions are sandbox-realm — the old new window.Function approach —
+// TestFirefoxBootstrapFunctionsPageRealm verifies that the bootstrap's onopen
+// and onmessage handlers are page-realm functions after a navigation (when the
+// preload fires). It checks that .length is readable on each handler from
+// page-realm code (script.evaluate). When functions are sandbox-realm,
 // Firefox's Xray wrapper throws "Permission denied to access property 'length'"
 // whenever page code inspects them, which is exactly what broke EggLedger.
 func TestFirefoxBootstrapFunctionsPageRealm(t *testing.T) {
@@ -287,16 +287,15 @@ func TestFirefoxBootstrapFunctionsPageRealm(t *testing.T) {
 		want string
 		desc string
 	}{
+		{`typeof window.__lorcaWS`, `"object"`, "__lorcaWS must be set"},
+		{`typeof window.__lorcaPending`, `"object"`, "__lorcaPending must be set"},
+		{`typeof window.__lorcaQueue`, `"object"`, "__lorcaQueue must be set"},
 		{`typeof window.__lorcaWS.onopen`, `"function"`, "onopen must be set"},
 		{`typeof window.__lorcaWS.onmessage`, `"function"`, "onmessage must be set"},
-		{`typeof window.__lorcaRegister`, `"function"`, "__lorcaRegister must be set"},
-		{`typeof window.__lorcaSend`, `"function"`, "__lorcaSend must be set"},
 		// .length access: page-realm functions expose it; sandbox-realm functions
 		// throw "Permission denied" when page code accesses .length via Xray.
 		{`typeof window.__lorcaWS.onopen.length`, `"number"`, "onopen.length readable (page-realm)"},
 		{`typeof window.__lorcaWS.onmessage.length`, `"number"`, "onmessage.length readable (page-realm)"},
-		{`typeof window.__lorcaRegister.length`, `"number"`, "__lorcaRegister.length readable (page-realm)"},
-		{`typeof window.__lorcaSend.length`, `"number"`, "__lorcaSend.length readable (page-realm)"},
 	} {
 		result, err := f.eval(c.expr)
 		if err != nil {
@@ -371,7 +370,7 @@ func TestFirefoxBindingBasic(t *testing.T) {
 }
 
 // TestFirefoxBindingMultiple verifies that several bindings registered on the
-// same UI instance all work — each gets its own preload script and its own
+// same UI instance all work -each gets its own preload script and its own
 // entry in the relay dispatch table.
 func TestFirefoxBindingMultiple(t *testing.T) {
 	binary := skipIfNoFirefox(t)

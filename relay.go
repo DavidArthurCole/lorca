@@ -54,7 +54,7 @@ func bindingScript(name string) string {
 // allowed method calls through Xray.
 //
 // window.__lorcaWS, __lorcaPending, __lorcaQueue, __lorcaOpen are all
-// non-function objects/primitives — Vue's reactivity system only checks
+// non-function objects/primitives -Vue's reactivity system only checks
 // .length on typeof-function values, so these are safe as sandbox-realm.
 const bootstrapTemplate = `(function() {
   var _proto = window.location && window.location.protocol
@@ -108,7 +108,7 @@ func (r *relay) bootstrapScript() string {
 }
 
 // bind registers name → f. If name already exists, only the handler is
-// updated (no register message is sent — a second register would reset the
+// updated (no register message is sent -a second register would reset the
 // JS-side seq counter). All writes to client happen under mu to serialise
 // with the replay in handleClient.
 func (r *relay) bind(name string, f bindingFunc) error {

@@ -209,7 +209,7 @@ func TestRelayRebind(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Rebind — must NOT send another register message to the client
+	// Rebind -must NOT send another register message to the client
 	r.bind("fn", mkHandler(2))
 
 	// Send a call; result should come from handler v=2
@@ -242,7 +242,7 @@ func TestRelayRebind(t *testing.T) {
 // creates a function whose realm is determined by the call site (the sandbox),
 // not by the constructor's origin. Page code then throws "Permission denied to
 // access property 'length'" when it inspects those sandbox-realm functions via
-// Firefox's Xray wrapper — breaking WebSocket event dispatch and binding calls.
+// Firefox's Xray wrapper -breaking WebSocket event dispatch and binding calls.
 // window.eval("...") is the correct fix: it evaluates code in the page realm.
 func TestBootstrapNoSandboxRealmFunctions(t *testing.T) {
 	if strings.Contains(bootstrapTemplate, "new window.Function") {

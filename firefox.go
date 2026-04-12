@@ -239,10 +239,10 @@ func (c *bidiConn) Receive(v interface{}) error {
 		switch opcode {
 		case 0x8: // close
 			return io.EOF
-		case 0x9: // ping — reply with pong
+		case 0x9: // ping -reply with pong
 			c.writeFrame(0xA, payload)
 			continue
-		case 0xA: // pong — ignore
+		case 0xA: // pong -ignore
 			continue
 		case 0x0, 0x1, 0x2: // continuation, text, binary
 			return json.Unmarshal(payload, v)
@@ -448,13 +448,13 @@ func (f *firefox) send(method string, params h) (json.RawMessage, error) {
 // readLoop because bidiConn.Send uses a separate write mutex.
 func (f *firefox) sendNoWait(method string, params h) {
 	id := int(atomic.AddInt32(&f.id, 1))
-	// Intentionally no f.pending entry — response is dropped.
+	// Intentionally no f.pending entry -response is dropped.
 	_ = f.bidi.Send(h{"id": id, "method": method, "params": params})
 }
 
 // bidiMsg is the shape of every message Firefox sends over the BiDi WebSocket.
 // BiDi error responses have "error" as a string error-code (e.g. "unknown error")
-// and a separate top-level "message" string — NOT a nested {"message":"..."} object.
+// and a separate top-level "message" string -NOT a nested {"message":"..."} object.
 type bidiMsg struct {
 	ID      int             `json:"id"`
 	Result  json.RawMessage `json:"result"`
@@ -484,7 +484,7 @@ func (f *firefox) readLoop() {
 				}{}
 				json.Unmarshal(m.Params, &params)
 				if params.Context == f.context {
-					log.Printf("lorca/firefox: main context destroyed — killing")
+					log.Printf("lorca/firefox: main context destroyed -killing")
 					f.kill()
 					return
 				}
@@ -503,7 +503,7 @@ func (f *firefox) readLoop() {
 				//
 				// We only do this for the main browsing context (f.context) and only when
 				// the params carry that context ID.  A goroutine is used because f.eval
-				// calls f.send which blocks waiting for readLoop to deliver the response —
+				// calls f.send which blocks waiting for readLoop to deliver the response -
 				// calling it inline here would deadlock.
 				var loadParams struct {
 					Context string `json:"context"`
@@ -528,9 +528,10 @@ func (f *firefox) readLoop() {
 				}
 			case "script.realmCreated":
 				log.Printf("lorca/firefox realmCreated raw: %s", string(m.Params))
-				// When the real-origin realm (origin != null) is created for our context,
-				// immediately send all binding scripts as a single script.evaluate —
-				// without spawning a goroutine or waiting for a response.
+				// When the real-origin window realm (origin != null) is created for
+				// our context, immediately send all binding scripts as a single
+				// script.evaluate -without spawning a goroutine or waiting for a
+				// response.
 				//
 				// Rationale: preloads fire in sandbox realm (Xray), so binding functions
 				// installed by them cause "Permission denied to access property 'length'"
@@ -545,13 +546,30 @@ func (f *firefox) readLoop() {
 				//
 				// Post-load re-eval (browsingContext.load handler) remains as
 				// belt-and-suspenders in case this race is lost.
+				//
+				// IMPORTANT: We must skip preload sandbox realm events.  When
+				// script.addPreloadScript is registered, Firefox fires realmCreated for
+				// the sandbox realm with type="window" and the real page origin -the
+				// same fields as a true window realm.  Using that sandbox realm's realm
+				// ID as the script.evaluate target would install binding functions in the
+				// sandbox realm, making them sandbox-realm functions that trigger
+				// "Permission denied to access property 'length'" in page-realm code.
+				//
+				// The WebDriver BiDi spec includes an optional "sandbox" field on
+				// WindowRealmInfo that is set for preload sandbox realms.  We skip events
+				// that carry a non-empty sandbox field.  As an additional guard we always
+				// use target:{context} rather than target:{realm}, so even if Firefox
+				// omits the sandbox field the evaluate lands in the context's default
+				// (page window) realm, not the sandbox.
 				var realmParams struct {
 					Realm   string `json:"realm"`
 					Origin  string `json:"origin"`
 					Context string `json:"context"`
 					Type    string `json:"type"`
+					Sandbox string `json:"sandbox"`
 				}
 				if err := json.Unmarshal(m.Params, &realmParams); err == nil &&
+					realmParams.Sandbox == "" &&
 					realmParams.Context == f.context &&
 					realmParams.Type == "window" &&
 					realmParams.Origin != "" && realmParams.Origin != "null" {
@@ -561,14 +579,10 @@ func (f *firefox) readLoop() {
 					if len(scripts) > 0 {
 						combined := strings.Join(scripts, "\n")
 						log.Printf("lorca/firefox: realmCreated realm=%s firing %d binding(s) early (no-wait)", realmParams.Realm, len(scripts))
-						target := h{"context": f.context}
-						if realmParams.Realm != "" {
-							target = h{"realm": realmParams.Realm}
-						}
 						f.sendNoWait("script.evaluate", h{
 							"expression":      combined,
 							"awaitPromise":    false,
-							"target":          target,
+							"target":          h{"context": f.context},
 							"resultOwnership": "none",
 						})
 					}
@@ -578,7 +592,7 @@ func (f *firefox) readLoop() {
 			}
 			continue
 		}
-		// Response — route to pending channel.
+		// Response -route to pending channel.
 		f.Lock()
 		ch, ok := f.pending[m.ID]
 		delete(f.pending, m.ID)
@@ -667,10 +681,10 @@ func (f *firefox) load(url string) error {
 // (e.g. Vue reactivity) must be installed via script.evaluate (f.eval) or the
 // post-load re-eval mechanism, not via preloads.  Confirmed dead ends from
 // BiDi preload sandbox:
-//   - window.eval(), new window.Function() — still sandbox-realm
-//   - exportFunction — not available in BiDi preloads
-//   - document.write — replaces the document, aborts browsingContext.navigate
-//   - <script> element append (direct or via MutationObserver) — also sandbox-realm
+//   - window.eval(), new window.Function() -still sandbox-realm
+//   - exportFunction -not available in BiDi preloads
+//   - document.write -replaces the document, aborts browsingContext.navigate
+//   - <script> element append (direct or via MutationObserver) -also sandbox-realm
 func scriptElementInject(code string) string {
 	encoded, _ := json.Marshal(code)
 	return `(function(){` +
@@ -723,7 +737,7 @@ func (f *firefox) injectBinding(name string) error {
 	// scripts run in a BiDi sandbox realm isolated from the page realm via
 	// Firefox's Xray wrappers.  Any function objects created in that sandbox
 	// cause "Permission denied to access property 'length'" when page-realm
-	// code (e.g. Vue's reactivity system) introspects them — even through a
+	// code (e.g. Vue's reactivity system) introspects them -even through a
 	// <script> element appended from the sandbox (also sandbox-realm per
 	// confirmed testing).
 	//
@@ -732,7 +746,7 @@ func (f *firefox) injectBinding(name string) error {
 	// install page-realm binding functions after the preload phase:
 	//
 	//   1. script.realmCreated handler (readLoop): fires sendNoWait as soon as
-	//      the real-origin window realm is created — wins the race vs Vue when
+	//      the real-origin window realm is created -wins the race vs Vue when
 	//      timing allows, silently loses when it doesn't (Vue still sees
 	//      undefined, no error).
 	//

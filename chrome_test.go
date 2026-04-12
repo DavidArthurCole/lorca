@@ -32,7 +32,7 @@ func TestChromeDone(t *testing.T) {
 	c.kill()
 	select {
 	case <-c.done():
-		// ok — channel closed after kill
+		// ok - channel closed after kill
 	case <-time.After(5 * time.Second):
 		t.Fatal("done() channel did not close within 5s after kill")
 	}
