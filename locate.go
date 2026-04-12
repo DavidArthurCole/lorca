@@ -97,18 +97,26 @@ func LocateChrome(preferPath string) string {
 		}
 	default:
 		paths = []string{
-			//Chrome
+			// Chrome / Chromium
 			"/usr/bin/google-chrome-stable",
 			"/usr/bin/google-chrome",
 			"/usr/bin/chromium",
 			"/usr/bin/chromium-browser",
 			"/snap/bin/chromium",
-			//Opera
+			// Opera
 			"/usr/bin/opera",
-			//Brave
+			"/snap/bin/opera",
+			// Brave
 			"/usr/bin/brave-browser",
-			//Vivaldi
+			"/usr/bin/brave-browser-stable",
+			"/snap/bin/brave",
+			// Vivaldi
 			"/usr/bin/vivaldi",
+			"/usr/bin/vivaldi-stable",
+			// Edge
+			"/usr/bin/microsoft-edge",
+			"/usr/bin/microsoft-edge-stable",
+			"/snap/bin/microsoft-edge",
 			// Firefox
 			"/usr/bin/firefox",
 			"/usr/bin/firefox-esr",
