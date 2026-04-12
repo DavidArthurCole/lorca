@@ -13,16 +13,27 @@ import (
 )
 
 // bindingScript returns the JS that installs window[name] as a relay-backed
-// binding function.  The generated code references window.__lorcaPending and
-// window.__lorcaSend, both of which are set up by the bootstrap.  It is safe
-// to inject in any realm (Chrome page realm via Page.addScriptToEvaluateOnNewDocument,
-// or Firefox page realm via script.evaluate / post-load re-eval).
+// binding function.  The generated code is safe to inject in any realm
+// (Chrome page realm via Page.addScriptToEvaluateOnNewDocument, or Firefox
+// page realm via script.evaluate / post-load re-eval).
+//
+// On Firefox, binding functions MUST be installed in the page realm (not the
+// BiDi preload sandbox realm) because page-realm code (e.g. Vue's reactivity
+// system) checks .length on functions it encounters, and accessing .length
+// on a sandbox-realm function throws "Permission denied to access property
+// 'length'" via Firefox's Xray wrapper.
+//
+// The send logic is inlined here (rather than delegating to window.__lorcaSend)
+// so that the binding function itself contains no references to sandbox-realm
+// function objects.  window.__lorcaWS.send() and window.__lorcaQueue.push()
+// are method calls on Xray-wrapped objects, which Firefox permits.
 func bindingScript(name string) string {
 	body := `var args = Array.prototype.slice.call(arguments); ` +
 		`var seq = (window['` + name + `']._seq = (window['` + name + `']._seq || 0) + 1); ` +
 		`return new Promise(function(resolve, reject) { ` +
 		`window.__lorcaPending.set('` + name + `:' + seq, {resolve: resolve, reject: reject}); ` +
-		`window.__lorcaSend(JSON.stringify({name: '` + name + `', seq: seq, args: args})); ` +
+		`var _m = JSON.stringify({name: '` + name + `', seq: seq, args: args}); ` +
+		`if (window.__lorcaOpen) { window.__lorcaWS.send(_m); } else { window.__lorcaQueue.push(_m); } ` +
 		`});`
 	return `window['` + name + `'] = function() { ` + body + ` }; window['` + name + `']._seq = 0;`
 }
@@ -30,20 +41,21 @@ func bindingScript(name string) string {
 // bootstrapTemplate is the JS code injected into every page to set up the
 // relay WebSocket and the lorca messaging primitives.
 //
-// For the preload path (script.addPreloadScript in firefox.go) this template
-// is NOT used directly inside the sandboxed functionDeclaration — instead
-// firefox.go wraps it in a <script> element injection so the code runs in the
-// page realm rather than the preload sandbox realm.  Running in the sandbox
-// realm causes "Permission denied to access property 'length'" whenever
-// page-realm code (e.g. Vue) introspects the resulting functions via Xray.
+// For the Firefox preload path (script.addPreloadScript in firefox.go) this
+// template runs in the BiDi preload sandbox realm.  All objects created here
+// are sandbox-realm objects accessible from page realm via Xray wrappers.
 //
-// window.eval() and new window.Function() do NOT fix this; both still produce
-// sandbox-realm objects because realm membership is determined by the call
-// site, not the constructor origin.  Only code executed as a DOM <script>
-// element is guaranteed to belong to the page realm.
+// IMPORTANT: window.__lorcaSend has been intentionally removed.  On Firefox,
+// the Xray wrapper allows METHOD CALLS on sandbox-realm objects (e.g.
+// window.__lorcaWS.send(), window.__lorcaQueue.push()) but throws
+// "Permission denied to access property 'length'" when page-realm code
+// introspects a sandbox-realm FUNCTION object.  bindingScript() inlines the
+// send logic to avoid any reference to a sandbox-realm function, using only
+// allowed method calls through Xray.
 //
-// For the script.evaluate path (f.eval in firefox.go) the template runs
-// directly in the page window realm, so no wrapper is needed there either.
+// window.__lorcaWS, __lorcaPending, __lorcaQueue, __lorcaOpen are all
+// non-function objects/primitives — Vue's reactivity system only checks
+// .length on typeof-function values, so these are safe as sandbox-realm.
 const bootstrapTemplate = `(function() {
   var _proto = window.location && window.location.protocol
   if (_proto && _proto !== 'http:' && _proto !== 'https:' && _proto !== 'data:') { return }
@@ -52,7 +64,6 @@ const bootstrapTemplate = `(function() {
   window.__lorcaPending = new Map()
   window.__lorcaQueue = []
   window.__lorcaOpen = false
-  window.__lorcaSend = function(msg) { if (window.__lorcaOpen) { window.__lorcaWS.send(msg) } else { window.__lorcaQueue.push(msg) } }
   window.__lorcaWS.onopen = function() { window.__lorcaOpen = true; for (var i = 0; i < window.__lorcaQueue.length; i++) { window.__lorcaWS.send(window.__lorcaQueue[i]) } window.__lorcaQueue = [] }
   window.__lorcaWS.onmessage = function(e) { var msg = JSON.parse(e.data); if (msg.type === 'result') { var cb = window.__lorcaPending.get(msg.name + ':' + msg.seq); if (cb) { if (msg.error) { cb.reject(new Error(msg.error)); } else { cb.resolve(msg.result); } window.__lorcaPending.delete(msg.name + ':' + msg.seq); } } }
 })()`

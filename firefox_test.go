@@ -224,8 +224,20 @@ func TestBindingScriptInvariants(t *testing.T) {
 			if !strings.Contains(code, "window.__lorcaPending") {
 				t.Errorf("output does not reference window.__lorcaPending:\n%s", code)
 			}
-			if !strings.Contains(code, "window.__lorcaSend") {
-				t.Errorf("output does not reference window.__lorcaSend:\n%s", code)
+			// window.__lorcaSend has been intentionally removed: on Firefox, a
+			// sandbox-realm function assigned to window causes
+			// "Permission denied to access property 'length'" when page-realm
+			// code (e.g. Vue) introspects it via Xray.  bindingScript inlines
+			// the send using window.__lorcaWS.send() / window.__lorcaQueue.push()
+			// instead (method calls on Xray-wrapped objects are permitted).
+			if strings.Contains(code, "window.__lorcaSend") {
+				t.Errorf("output must NOT reference window.__lorcaSend (sandbox-realm function):\n%s", code)
+			}
+			if !strings.Contains(code, "window.__lorcaWS.send") {
+				t.Errorf("output does not reference window.__lorcaWS.send:\n%s", code)
+			}
+			if !strings.Contains(code, "window.__lorcaQueue.push") {
+				t.Errorf("output does not reference window.__lorcaQueue.push:\n%s", code)
 			}
 
 			// Wrapping in window.eval("...") must add exactly two double quotes —
