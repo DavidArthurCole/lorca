@@ -35,7 +35,16 @@ func bindingScript(name string) string {
 		`var _m = JSON.stringify({name: '` + name + `', seq: seq, args: args}); ` +
 		`if (window.__lorcaOpen) { window.__lorcaWS.send(_m); } else { window.__lorcaQueue.push(_m); } ` +
 		`});`
-	return `window['` + name + `'] = function() { ` + body + ` }; window['` + name + `']._seq = 0;`
+	// Wrap in an IIFE that captures and preserves the current _seq counter.
+	// When the binding script is re-evaluated (e.g. by the post-load re-eval
+	// in firefox.go), creating a new function object would reset _seq to 0.
+	// If a call is still in-flight at seq=N and a new call also gets seq=N
+	// after the reset, the new call overwrites the old pending entry in
+	// __lorcaPending - the old Promise never resolves, Vue reads null.
+	// Preserving _seq ensures new calls continue from the current counter.
+	return `(function() { var _s = (window['` + name + `'] && window['` + name + `']._seq) || 0; ` +
+		`window['` + name + `'] = function() { ` + body + ` }; ` +
+		`window['` + name + `']._seq = _s; })()`
 }
 
 // bootstrapTemplate is the JS code injected into every page to set up the
