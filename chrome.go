@@ -45,7 +45,6 @@ type chrome struct {
 	session   string
 	window    int
 	pending   map[int]chan result
-	bindings  map[string]bindingFunc
 	debugPort int
 }
 
@@ -67,12 +66,11 @@ func getFreePort() (int, error) {
 	return ln.Addr().(*net.TCPAddr).Port, nil
 }
 
-func newChromeWithArgs(chromeBinary string, args ...string) (*chrome, error) {
+func newChromeWithArgs(chromeBinary string, bootstrapScript string, args ...string) (*chrome, error) {
 	// The first two IDs are used internally during the initialization
 	c := &chrome{
-		id:       2,
-		pending:  map[int]chan result{},
-		bindings: map[string]bindingFunc{},
+		id:      2,
+		pending: map[int]chan result{},
 	}
 
 	debugPort, err := getFreePort()
@@ -152,10 +150,24 @@ func newChromeWithArgs(chromeBinary string, args ...string) (*chrome, error) {
 		}
 	}
 
+	if bootstrapScript != "" {
+		if _, err := c.send("Page.addScriptToEvaluateOnNewDocument", h{"source": bootstrapScript}); err != nil {
+			c.kill()
+			c.cmd.Wait()
+			return nil, err
+		}
+		if _, err := c.eval(bootstrapScript); err != nil {
+			c.kill()
+			c.cmd.Wait()
+			return nil, err
+		}
+	}
+
 	if !contains(args, "--headless") {
 		win, err := c.getWindowForTarget(c.target)
 		if err != nil {
 			c.kill()
+			c.cmd.Wait()
 			return nil, err
 		}
 		c.window = win.WindowID
@@ -286,7 +298,10 @@ type targetMessage struct {
 		} `json:"result"`
 		Exception struct {
 			Exception struct {
-				Value json.RawMessage `json:"value"`
+				Type        string          `json:"type"`
+				Subtype     string          `json:"subtype"`
+				Description string          `json:"description"`
+				Value       json.RawMessage `json:"value"`
 			} `json:"exception"`
 		} `json:"exceptionDetails"`
 	} `json:"result"`
@@ -313,41 +328,6 @@ func (c *chrome) readLoop() {
 
 			if res.ID == 0 && res.Method == "Runtime.consoleAPICalled" || res.Method == "Runtime.exceptionThrown" {
 				log.Println(params.Message)
-			} else if res.ID == 0 && res.Method == "Runtime.bindingCalled" {
-				payload := struct {
-					Name string            `json:"name"`
-					Seq  int               `json:"seq"`
-					Args []json.RawMessage `json:"args"`
-				}{}
-				json.Unmarshal([]byte(res.Params.Payload), &payload)
-
-				c.Lock()
-				binding, ok := c.bindings[res.Params.Name]
-				c.Unlock()
-				if ok {
-					jsString := func(v interface{}) string { b, _ := json.Marshal(v); return string(b) }
-					go func() {
-						result, error := "", `""`
-						if r, err := binding(payload.Args); err != nil {
-							error = jsString(err.Error())
-						} else if b, err := json.Marshal(r); err != nil {
-							error = jsString(err.Error())
-						} else {
-							result = string(b)
-						}
-						expr := fmt.Sprintf(`
-							if (%[4]s) {
-								window['%[1]s']['errors'].get(%[2]d)(%[4]s);
-							} else {
-								window['%[1]s']['callbacks'].get(%[2]d)(%[3]s);
-							}
-							window['%[1]s']['callbacks'].delete(%[2]d);
-							window['%[1]s']['errors'].delete(%[2]d);
-							`, payload.Name, payload.Seq, result, error)
-						c.send("Runtime.evaluate", h{"expression": expr, "contextId": res.Params.ID})
-					}()
-				}
-				continue
 			}
 
 			c.Lock()
@@ -363,6 +343,8 @@ func (c *chrome) readLoop() {
 				resc <- result{Err: errors.New(res.Error.Message)}
 			} else if res.Result.Exception.Exception.Value != nil {
 				resc <- result{Err: errors.New(string(res.Result.Exception.Exception.Value))}
+			} else if res.Result.Exception.Exception.Subtype == "error" {
+				resc <- result{Err: errors.New(res.Result.Exception.Exception.Description)}
 			} else if res.Result.Result.Type == "object" && res.Result.Result.Subtype == "error" {
 				resc <- result{Err: errors.New(res.Result.Result.Description)}
 			} else if res.Result.Result.Type != "" {
@@ -417,56 +399,6 @@ func (c *chrome) load(url string) error {
 
 func (c *chrome) eval(expr string) (json.RawMessage, error) {
 	return c.send("Runtime.evaluate", h{"expression": expr, "awaitPromise": true, "returnByValue": true})
-}
-
-func (c *chrome) bind(name string, f bindingFunc) error {
-	c.Lock()
-	// check if binding already exists
-	_, exists := c.bindings[name]
-
-	c.bindings[name] = f
-	c.Unlock()
-
-	if exists {
-		// Just replace callback and return, as the binding was already added to js
-		// and adding it again would break it.
-		return nil
-	}
-
-	if _, err := c.send("Runtime.addBinding", h{"name": name}); err != nil {
-		return err
-	}
-	script := fmt.Sprintf(`(() => {
-	const bindingName = '%s';
-	const binding = window[bindingName];
-	window[bindingName] = async (...args) => {
-		const me = window[bindingName];
-		let errors = me['errors'];
-		let callbacks = me['callbacks'];
-		if (!callbacks) {
-			callbacks = new Map();
-			me['callbacks'] = callbacks;
-		}
-		if (!errors) {
-			errors = new Map();
-			me['errors'] = errors;
-		}
-		const seq = (me['lastSeq'] || 0) + 1;
-		me['lastSeq'] = seq;
-		const promise = new Promise((resolve, reject) => {
-			callbacks.set(seq, resolve);
-			errors.set(seq, reject);
-		});
-		binding(JSON.stringify({name: bindingName, seq, args}));
-		return promise;
-	}})();
-	`, name)
-	_, err := c.send("Page.addScriptToEvaluateOnNewDocument", h{"source": script})
-	if err != nil {
-		return err
-	}
-	_, err = c.eval(script)
-	return err
 }
 
 func (c *chrome) setBounds(b Bounds) error {
@@ -561,7 +493,7 @@ func (c *chrome) kill() error {
 	defer c.Unlock()
 
 	if state := c.cmd.ProcessState; state == nil || !state.Exited() {
-		return c.cmd.Process.Kill()
+		return killProcessTree(c.cmd.Process.Pid)
 	}
 	return nil
 }

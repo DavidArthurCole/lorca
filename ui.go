@@ -22,6 +22,7 @@ type UI interface {
 
 type ui struct {
 	chrome *chrome
+	relay  *relay
 	done   chan struct{}
 	tmpDir string
 }
@@ -31,12 +32,13 @@ var defaultChromeArgs = []string{
 	"--disable-background-timer-throttling",
 	"--disable-backgrounding-occluded-windows",
 	"--disable-breakpad",
+	"--disable-crash-reporter",
 	"--disable-client-side-phishing-detection",
 	"--disable-default-apps",
 	"--disable-dev-shm-usage",
 	"--disable-infobars",
 	"--disable-extensions",
-	"--disable-features=site-per-process",
+	"--disable-features=site-per-process,BlockInsecurePrivateNetworkRequests,PrivateNetworkAccessChecks",
 	"--disable-hang-monitor",
 	"--disable-ipc-flooding-protection",
 	"--disable-popup-blocking",
@@ -74,22 +76,29 @@ func New(url, dir, preferPath string, width, height int, customArgs ...string) (
 		}
 		dir, tmpDir = name, name
 	}
+
+	r, err := newRelay()
+	if err != nil {
+		return nil, err
+	}
+
 	args := append(defaultChromeArgs, fmt.Sprintf("--app=%s", url))
 	args = append(args, fmt.Sprintf("--user-data-dir=%s", dir))
 	args = append(args, fmt.Sprintf("--window-size=%d,%d", width, height))
 	args = append(args, customArgs...)
 
-	chrome, err := newChromeWithArgs(ChromeExecutable(preferPath), args...)
-	done := make(chan struct{})
+	chrome, err := newChromeWithArgs(ChromeExecutable(preferPath), r.bootstrapScript(), args...)
 	if err != nil {
+		r.close()
 		return nil, err
 	}
 
+	done := make(chan struct{})
 	go func() {
 		chrome.cmd.Wait()
 		close(done)
 	}()
-	return &ui{chrome: chrome, done: done, tmpDir: tmpDir}, nil
+	return &ui{chrome: chrome, relay: r, done: done, tmpDir: tmpDir}, nil
 }
 
 func (u *ui) Done() <-chan struct{} {
@@ -97,6 +106,7 @@ func (u *ui) Done() <-chan struct{} {
 }
 
 func (u *ui) Close() error {
+	u.relay.close()
 	// ignore err, as the chrome process might be already dead, when user close the window.
 	u.chrome.kill()
 	<-u.done
@@ -121,7 +131,7 @@ func (u *ui) Bind(name string, f interface{}) error {
 		return errors.New("function may only return a value or a value+error")
 	}
 
-	return u.chrome.bind(name, func(raw []json.RawMessage) (interface{}, error) {
+	if err := u.relay.bind(name, func(raw []json.RawMessage) (interface{}, error) {
 		if len(raw) != v.Type().NumIn() {
 			return nil, errors.New("function arguments mismatch")
 		}
@@ -160,7 +170,14 @@ func (u *ui) Bind(name string, f interface{}) error {
 		default:
 			return nil, errors.New("unexpected number of return values")
 		}
-	})
+	}); err != nil {
+		return err
+	}
+	// Install the binding in the current page context immediately so callers
+	// can Eval the binding right after Bind returns, without waiting for the
+	// relay WebSocket register message to be processed asynchronously.
+	_, err := u.chrome.eval(fmt.Sprintf(`window.__lorcaRegister('%s')`, name))
+	return err
 }
 
 func (u *ui) Eval(js string) Value {
