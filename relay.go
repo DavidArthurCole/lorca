@@ -25,8 +25,7 @@ const bootstrapTemplate = `(function() {
     _sendQueue = []
   }
   function _register(name) {
-    window[name] = function() {
-      const args = Array.prototype.slice.call(arguments)
+    window[name] = function(...args) {
       return new Promise(function(resolve, reject) {
         const seq = (window[name]._seq = (window[name]._seq || 0) + 1)
         _pending.set(name + ':' + seq, {resolve: resolve, reject: reject})
