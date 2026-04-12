@@ -224,11 +224,12 @@ func (u *ui) Bind(name string, f interface{}) error {
 	}); err != nil {
 		return err
 	}
-	// Install the binding in the current page context immediately so callers
-	// can Eval the binding right after Bind returns, without waiting for the
-	// relay WebSocket register message to be processed asynchronously.
-	_, err := u.browser.eval(fmt.Sprintf(`window.__lorcaRegister('%s')`, name))
-	return err
+	// Install the binding on the current page immediately AND register it for
+	// all future page loads via addScriptToEvaluateOnNewDocument. This ensures
+	// bound functions are available synchronously before any page JS runs,
+	// avoiding the race where a page mounts before the relay WebSocket has
+	// delivered its register messages.
+	return u.browser.injectScript(fmt.Sprintf(`window.__lorcaRegister('%s')`, name))
 }
 
 func (u *ui) Eval(js string) Value {
