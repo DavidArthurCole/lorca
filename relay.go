@@ -79,7 +79,8 @@ const bootstrapTemplate = `(function() {
 })()`
 
 type relay struct {
-	mu       sync.Mutex
+	mu       sync.Mutex   // guards bindings, names, client (held briefly)
+	writeMu  sync.Mutex   // serialises WebSocket writes (can be held longer)
 	bindings map[string]bindingFunc
 	names    []string
 	client   *websocket.Conn
@@ -118,43 +119,57 @@ func (r *relay) bootstrapScript() string {
 }
 
 // bind registers name → f. If name already exists, only the handler is
-// updated (no register message is sent -a second register would reset the
-// JS-side seq counter). All writes to client happen under mu to serialise
-// with the replay in handleClient.
+// updated (no register message is sent - a second register would reset the
+// JS-side seq counter). Metadata is updated under mu (short hold); the
+// register write uses writeMu so it does not block result goroutines.
 func (r *relay) bind(name string, f bindingFunc) error {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	_, exists := r.bindings[name]
 	r.bindings[name] = f
 	if exists {
+		r.mu.Unlock()
 		return nil
 	}
 	r.names = append(r.names, name)
-	if r.client != nil {
-		return websocket.JSON.Send(r.client, map[string]string{"type": "register", "name": name})
+	client := r.client
+	r.mu.Unlock()
+
+	if client == nil {
+		return nil
 	}
-	return nil
+	r.writeMu.Lock()
+	err := websocket.JSON.Send(client, map[string]string{"type": "register", "name": name})
+	r.writeMu.Unlock()
+	return err
 }
 
 func (r *relay) handleClient(ws *websocket.Conn) {
-	// Swap in new client and replay all registered bindings under the lock.
-	// Holding the lock during replay (a few loopback writes) prevents bind()
-	// racing to send a duplicate register for a name that is also in the list.
+	// Swap in new client under the short metadata lock and snapshot the name
+	// list. bind() only appends names for brand-new bindings, so any name in
+	// the snapshot is unique - no duplicate registers can race.
 	r.mu.Lock()
 	old := r.client
 	r.client = ws
-	log.Printf("lorca/relay: page connected, replaying %d binding(s)", len(r.names))
-	for _, name := range r.names {
+	names := make([]string, len(r.names))
+	copy(names, r.names)
+	r.mu.Unlock()
+
+	log.Printf("lorca/relay: page connected, replaying %d binding(s)", len(names))
+
+	// Replay registrations under the write lock so result goroutines cannot
+	// interleave sends with the registration burst.
+	r.writeMu.Lock()
+	for _, name := range names {
 		if err := websocket.JSON.Send(ws, map[string]string{"type": "register", "name": name}); err != nil {
 			log.Printf("lorca/relay: send register(%s) failed: %v", name, err)
-			r.mu.Unlock()
+			r.writeMu.Unlock()
 			if old != nil {
 				old.Close()
 			}
 			return
 		}
 	}
-	r.mu.Unlock()
+	r.writeMu.Unlock()
 
 	if old != nil {
 		old.Close()
@@ -199,13 +214,26 @@ func (r *relay) handleClient(ws *websocket.Conn) {
 				raw := json.RawMessage(b)
 				msg.Result = &raw
 			}
+			// Snapshot the active client under the short metadata lock.
 			r.mu.Lock()
-			// Only write if this is still the active client. Results for
-			// in-flight calls from a navigated-away page are discarded.
-			if r.client == ws {
-				websocket.JSON.Send(r.client, msg) //nolint:errcheck
-			}
+			client := r.client
 			r.mu.Unlock()
+			if client != ws {
+				// Result for a navigated-away page - discard.
+				return
+			}
+			// Acquire the write lock to send. Other result goroutines returning
+			// large payloads will queue here rather than blocking the metadata
+			// lock, so short results (e.g. getExistingData) are never starved.
+			r.writeMu.Lock()
+			// Re-verify the client under mu in case it changed while we waited.
+			r.mu.Lock()
+			active := r.client == ws
+			r.mu.Unlock()
+			if active {
+				websocket.JSON.Send(client, msg) //nolint:errcheck
+			}
+			r.writeMu.Unlock()
 		}()
 	}
 
