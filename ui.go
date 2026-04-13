@@ -73,7 +73,7 @@ const (
 // NewWithBrowser is like New but lets the caller specify which browser backend
 // to use. hint == BrowserAuto inspects the resolved binary name; a path
 // containing "firefox" (case-insensitive) selects the Firefox backend.
-func NewWithBrowser(url, dir, preferPath string, width, height int, hint BrowserHint, customArgs ...string) (UI, error) {
+func NewWithBrowser(url, dir, preferPath string, width, height int, hint BrowserHint, appIconPath string, customArgs ...string) (UI, error) {
 	if url == "" {
 		url = "data:text/html,<html></html>"
 	}
@@ -117,7 +117,7 @@ func NewWithBrowser(url, dir, preferPath string, width, height int, hint Browser
 		)
 		args = append(args, customArgs...)
 		args = append(args, url)
-		browser, err = newFirefoxWithArgs(binary, args...)
+		browser, err = newFirefoxWithArgs(binary, appIconPath, args...)
 	} else {
 		args := append(append([]string{}, defaultChromeArgs...),
 			fmt.Sprintf("--app=%s", url),
@@ -146,10 +146,12 @@ func NewWithBrowser(url, dir, preferPath string, width, height int, hint Browser
 // size and other options passed to the browser engine. If URL is an empty
 // string - a blank page is displayed. If user profile directory is an empty
 // string - a temporary directory is created and it will be removed on
-// ui.Close(). You might want to use "--headless" custom CLI argument to test
-// your UI code.
-func New(url, dir, preferPath string, width, height int, customArgs ...string) (UI, error) {
-	return NewWithBrowser(url, dir, preferPath, width, height, BrowserAuto, customArgs...)
+// ui.Close(). appIconPath is an optional path to a .ico file used to set the
+// window icon when running under Firefox; pass an empty string to fall back to
+// PE resource 1 (goversioninfo convention) or to skip icon setup. You might
+// want to use "--headless" custom CLI argument to test your UI code.
+func New(url, dir, preferPath string, width, height int, appIconPath string, customArgs ...string) (UI, error) {
+	return NewWithBrowser(url, dir, preferPath, width, height, BrowserAuto, appIconPath, customArgs...)
 }
 
 func (u *ui) Done() <-chan struct{} {

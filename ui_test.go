@@ -9,7 +9,7 @@ import (
 )
 
 func TestEval(t *testing.T) {
-	ui, err := New("", "", "", 480, 320, "--headless")
+	ui, err := New("", "", "", 480, 320, "", "--headless")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -34,7 +34,7 @@ func TestEval(t *testing.T) {
 }
 
 func TestBind(t *testing.T) {
-	ui, err := New("", "", "", 480, 320, "--headless")
+	ui, err := New("", "", "", 480, 320, "", "--headless")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,7 +89,7 @@ func TestBind(t *testing.T) {
 }
 
 func TestFunctionReturnTypes(t *testing.T) {
-	ui, err := New("", "", "", 480, 320, "--headless")
+	ui, err := New("", "", "", 480, 320, "", "--headless")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,7 +153,7 @@ func TestFunctionReturnTypes(t *testing.T) {
 }
 
 func TestNewWithBrowserChrome(t *testing.T) {
-	ui, err := NewWithBrowser("", "", "", 480, 320, BrowserChrome, "--headless")
+	ui, err := NewWithBrowser("", "", "", 480, 320, BrowserChrome, "", "--headless")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,7 +164,7 @@ func TestNewWithBrowserChrome(t *testing.T) {
 }
 
 func TestNewWithBrowserAuto(t *testing.T) {
-	ui, err := NewWithBrowser("", "", "", 480, 320, BrowserAuto, "--headless")
+	ui, err := NewWithBrowser("", "", "", 480, 320, BrowserAuto, "", "--headless")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -179,7 +179,7 @@ func TestNewWithBrowserFirefox(t *testing.T) {
 	if !ok || ffPath == "" {
 		t.Skip("LORCAFIREFOX not set")
 	}
-	ui, err := NewWithBrowser("", "", ffPath, 480, 320, BrowserFirefox, "--headless")
+	ui, err := NewWithBrowser("", "", ffPath, 480, 320, BrowserFirefox, "", "--headless")
 	if err != nil {
 		t.Fatal(err)
 	}

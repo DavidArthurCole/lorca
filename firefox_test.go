@@ -55,7 +55,7 @@ func TestBidiValueToJSON(t *testing.T) {
 func TestFirefoxNew(t *testing.T) {
 	binary := skipIfNoFirefox(t)
 	dir := t.TempDir()
-	f, err := newFirefoxWithArgs(binary, "--headless", "--profile", dir)
+	f, err := newFirefoxWithArgs(binary, "", "--headless", "--profile", dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,7 +70,7 @@ func TestFirefoxNew(t *testing.T) {
 func TestFirefoxEval(t *testing.T) {
 	binary := skipIfNoFirefox(t)
 	dir := t.TempDir()
-	f, err := newFirefoxWithArgs(binary, "--headless", "--profile", dir)
+	f, err := newFirefoxWithArgs(binary, "", "--headless", "--profile", dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,7 +105,7 @@ func TestFirefoxEval(t *testing.T) {
 func TestFirefoxLoad(t *testing.T) {
 	binary := skipIfNoFirefox(t)
 	dir := t.TempDir()
-	f, err := newFirefoxWithArgs(binary, "--headless", "--profile", dir)
+	f, err := newFirefoxWithArgs(binary, "", "--headless", "--profile", dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,7 +126,7 @@ func TestFirefoxLoad(t *testing.T) {
 func TestFirefoxInjectScript(t *testing.T) {
 	binary := skipIfNoFirefox(t)
 	dir := t.TempDir()
-	f, err := newFirefoxWithArgs(binary, "--headless", "--profile", dir)
+	f, err := newFirefoxWithArgs(binary, "", "--headless", "--profile", dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,7 +147,7 @@ func TestFirefoxInjectScript(t *testing.T) {
 func TestFirefoxBounds(t *testing.T) {
 	binary := skipIfNoFirefox(t)
 	dir := t.TempDir()
-	f, err := newFirefoxWithArgs(binary, "--headless", "--profile", dir, "--window-size=800,600")
+	f, err := newFirefoxWithArgs(binary, "", "--headless", "--profile", dir, "--window-size=800,600")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,7 +165,7 @@ func TestFirefoxBounds(t *testing.T) {
 func TestFirefoxSetBounds(t *testing.T) {
 	binary := skipIfNoFirefox(t)
 	dir := t.TempDir()
-	f, err := newFirefoxWithArgs(binary, "--headless", "--profile", dir)
+	f, err := newFirefoxWithArgs(binary, "", "--headless", "--profile", dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -268,7 +268,7 @@ func TestFirefoxBootstrapFunctionsPageRealm(t *testing.T) {
 	}
 	defer r.close()
 
-	f, err := newFirefoxWithArgs(binary, "--headless", "--profile", t.TempDir())
+	f, err := newFirefoxWithArgs(binary, "", "--headless", "--profile", t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -320,7 +320,7 @@ func TestFirefoxBindingScriptPageRealm(t *testing.T) {
 	}
 	defer r.close()
 
-	f, err := newFirefoxWithArgs(binary, "--headless", "--profile", t.TempDir())
+	f, err := newFirefoxWithArgs(binary, "", "--headless", "--profile", t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -351,7 +351,7 @@ func TestFirefoxBindingScriptPageRealm(t *testing.T) {
 func TestFirefoxBindingBasic(t *testing.T) {
 	binary := skipIfNoFirefox(t)
 	ui, err := NewWithBrowser("data:text/html,<html></html>", t.TempDir(),
-		binary, 480, 320, BrowserFirefox, "--headless")
+		binary, 480, 320, BrowserFirefox, "", "--headless")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -375,7 +375,7 @@ func TestFirefoxBindingBasic(t *testing.T) {
 func TestFirefoxBindingMultiple(t *testing.T) {
 	binary := skipIfNoFirefox(t)
 	ui, err := NewWithBrowser("data:text/html,<html></html>", t.TempDir(),
-		binary, 480, 320, BrowserFirefox, "--headless")
+		binary, 480, 320, BrowserFirefox, "", "--headless")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -408,7 +408,7 @@ func TestFirefoxBindingMultiple(t *testing.T) {
 func TestFirefoxBindingAfterNavigation(t *testing.T) {
 	binary := skipIfNoFirefox(t)
 	ui, err := NewWithBrowser("data:text/html,<html>page1</html>", t.TempDir(),
-		binary, 480, 320, BrowserFirefox, "--headless")
+		binary, 480, 320, BrowserFirefox, "", "--headless")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -435,7 +435,7 @@ func TestFirefoxBindingAfterNavigation(t *testing.T) {
 func TestFirefoxBindingError(t *testing.T) {
 	binary := skipIfNoFirefox(t)
 	ui, err := NewWithBrowser("data:text/html,<html></html>", t.TempDir(),
-		binary, 480, 320, BrowserFirefox, "--headless")
+		binary, 480, 320, BrowserFirefox, "", "--headless")
 	if err != nil {
 		t.Fatal(err)
 	}

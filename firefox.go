@@ -278,7 +278,7 @@ func (f *firefox) closeDone() {
 	f.doneOnce.Do(func() { close(f.doneC) })
 }
 
-func newFirefoxWithArgs(binary string, args ...string) (*firefox, error) {
+func newFirefoxWithArgs(binary string, iconPath string, args ...string) (*firefox, error) {
 	f := &firefox{
 		id:      1, // 0 used for session.new, 1 for getTree during init; send() increments before use
 		pending: map[int]chan result{},
@@ -423,7 +423,7 @@ func newFirefoxWithArgs(binary string, args ...string) (*firefox, error) {
 
 	// Apply the host executable's icon to Firefox's window on platforms that
 	// support it.  Runs in a background goroutine to avoid blocking startup.
-	go applyFirefoxWindowIcon(f.cmd.Process.Pid)
+	go applyFirefoxWindowIcon(f.cmd.Process.Pid, iconPath)
 
 	return f, nil
 }

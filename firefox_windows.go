@@ -30,7 +30,8 @@ const (
 	fxwIconSmall         = uintptr(0)
 	fxwIconBig           = uintptr(1)
 	fxwImageIcon         = uintptr(1)
-	fxwLRDefaultSize     = uintptr(0x40)
+	fxwLRDefaultSize     = uintptr(0x0040)
+	fxwLRLoadFromFile    = uintptr(0x0010)
 	fxwLRShared          = uintptr(0x8000)
 	fxwTH32CSSnapProcess = uintptr(0x00000002)
 	fxwInvalidHandle     = ^uintptr(0)
@@ -89,20 +90,32 @@ func fxwDescendantPIDs(launcherPID int) map[uint32]bool {
 }
 
 // applyFirefoxWindowIcon sets WM_SETICON on all top-level visible windows
-// owned by the Firefox process tree, using icon resource 1 from the host
-// executable.  By convention, Go apps built with goversioninfo/rsrc embed
-// their app icon as resource group 1.
+// owned by the Firefox process tree.  iconPath, if non-empty, is the path to
+// a .ico file (including PNG-in-ICO) that is loaded with LR_LOADFROMFILE.
+// When iconPath is empty, the function falls back to PE icon resource 1 from
+// the host executable (the goversioninfo/rsrc convention).
 //
 // Called from a background goroutine so the 500ms delay doesn't block startup.
-func applyFirefoxWindowIcon(launcherPID int) {
+func applyFirefoxWindowIcon(launcherPID int, iconPath string) {
 	// Wait for Firefox to create and show its main window.
 	time.Sleep(500 * time.Millisecond)
 
-	// Load icon from the current (host) executable - resource group ID 1.
-	hInst, _, _ := fxwGetModuleHandleW.Call(0)
-	hIcon, _, _ := fxwLoadImageW.Call(hInst, 1, fxwImageIcon, 0, 0, fxwLRDefaultSize|fxwLRShared)
+	var hIcon uintptr
+	if iconPath != "" {
+		// Load the icon from the supplied file path.
+		// hInstance must be NULL when LR_LOADFROMFILE is set.
+		pathPtr, err := syscall.UTF16PtrFromString(iconPath)
+		if err == nil {
+			hIcon, _, _ = fxwLoadImageW.Call(0, uintptr(unsafe.Pointer(pathPtr)), fxwImageIcon, 0, 0, fxwLRDefaultSize|fxwLRLoadFromFile)
+		}
+	}
 	if hIcon == 0 {
-		log.Printf("lorca/firefox: applyWindowIcon: no icon resource 1 in host executable")
+		// Fallback: load icon resource 1 from the host executable.
+		hInst, _, _ := fxwGetModuleHandleW.Call(0)
+		hIcon, _, _ = fxwLoadImageW.Call(hInst, 1, fxwImageIcon, 0, 0, fxwLRDefaultSize|fxwLRShared)
+	}
+	if hIcon == 0 {
+		log.Printf("lorca/firefox: applyWindowIcon: could not load icon (path=%q)", iconPath)
 		return
 	}
 
