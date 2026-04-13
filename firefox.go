@@ -482,7 +482,6 @@ func (f *firefox) readLoop() {
 		if m.Method != "" {
 			switch m.Method {
 			case "browsingContext.contextDestroyed":
-				log.Printf("lorca/firefox contextDestroyed raw: %s", string(m.Params))
 				params := struct {
 					Context string `json:"context"`
 				}{}
@@ -493,11 +492,10 @@ func (f *firefox) readLoop() {
 					return
 				}
 			case "log.entryAdded":
-				log.Printf("lorca/firefox log.entryAdded raw: %s", string(m.Params))
+				// console output from the page - silently ignored
 			case "browsingContext.navigationStarted":
-				log.Printf("lorca/firefox navigationStarted raw: %s", string(m.Params))
+				// navigation lifecycle - silently ignored
 			case "browsingContext.load":
-				log.Printf("lorca/firefox load raw: %s", string(m.Params))
 				// Re-eval all scripts (bootstrap first, then bindings) in the page
 				// window realm via a single script.evaluate call.  f.eval targets the
 				// page window realm via target:{context}, creating page-realm objects.
@@ -515,18 +513,13 @@ func (f *firefox) readLoop() {
 					f.Unlock()
 					if len(scripts) > 0 {
 						go func(scripts []string) {
-							combined := strings.Join(scripts, ";\n")
-							log.Printf("lorca/firefox: post-load re-eval %d script(s) in page realm", len(scripts))
-							if _, err := f.eval(combined); err != nil {
+							if _, err := f.eval(strings.Join(scripts, ";\n")); err != nil {
 								log.Printf("lorca/firefox: post-load eval error: %v", err)
-							} else {
-								log.Printf("lorca/firefox: post-load re-eval complete")
 							}
 						}(scripts)
 					}
 				}
 			case "script.realmCreated":
-				log.Printf("lorca/firefox realmCreated raw: %s", string(m.Params))
 				// When the real-origin window realm (origin != null) is created for
 				// our context, immediately send all loadScripts (bootstrap first, then
 				// bindings) as a single script.evaluate, without spawning a goroutine
@@ -565,18 +558,14 @@ func (f *firefox) readLoop() {
 					scripts := append([]string(nil), f.loadScripts...)
 					f.Unlock()
 					if len(scripts) > 0 {
-						combined := strings.Join(scripts, ";\n")
-						log.Printf("lorca/firefox: realmCreated realm=%s firing %d script(s) early (no-wait)", realmParams.Realm, len(scripts))
 						f.sendNoWait("script.evaluate", h{
-							"expression":      combined,
+							"expression":      strings.Join(scripts, ";\n"),
 							"awaitPromise":    false,
 							"target":          h{"context": f.context},
 							"resultOwnership": "none",
 						})
 					}
 				}
-			default:
-				log.Printf("lorca/firefox: unhandled event %s: %s", m.Method, string(m.Params))
 			}
 			continue
 		}
@@ -656,10 +645,6 @@ func (f *firefox) load(url string) error {
 }
 
 func (f *firefox) injectScript(js string) error {
-	preview := js
-	if len(preview) > 120 {
-		preview = preview[:120] + "..."
-	}
 	// Do NOT register this script via script.addPreloadScript.  Preload scripts
 	// run in a BiDi sandbox realm, and ALL objects created there — including
 	// bootstrap objects like window.__lorcaWS, window.__lorcaWS.onopen, and
@@ -684,7 +669,6 @@ func (f *firefox) injectScript(js string) error {
 	// reference window.__lorcaWS etc. which must exist first).
 	f.loadScripts = append([]string{js}, f.loadScripts...)
 	f.Unlock()
-	log.Printf("lorca/firefox injectScript eval: %s", preview)
 	_, err := f.eval(js)
 	if err != nil {
 		log.Printf("lorca/firefox injectScript eval error: %v", err)
