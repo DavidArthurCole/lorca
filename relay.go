@@ -63,19 +63,29 @@ func bindingScript(name string) string {
 // allowed method calls through Xray.
 //
 // window.__lorcaWS, __lorcaPending, __lorcaQueue, __lorcaOpen are all
-// non-function objects/primitives -Vue's reactivity system only checks
+// non-function objects/primitives - Vue's reactivity system only checks
 // .length on typeof-function values, so these are safe as sandbox-realm.
+//
+// __lorcaSetupWS is a local function (not on window) that initialises a fresh
+// WebSocket connection and wires all its handlers.  Keeping it in the IIFE
+// scope rather than on window avoids Xray length-introspection issues on
+// Firefox while still being reachable by the onclose reconnect closure.
 const bootstrapTemplate = `(function() {
   var _proto = window.location && window.location.protocol
   if (_proto && _proto !== 'http:' && _proto !== 'https:' && _proto !== 'data:') { return }
   if (_proto !== 'data:') { var _orig = window.location.origin; if (!_orig || _orig === 'null') { return } }
   if (window.__lorcaWS && window.__lorcaWS.readyState <= 1) { return }
-  window.__lorcaWS = new WebSocket('ws://127.0.0.1:__RELAY_PORT__')
   window.__lorcaPending = new Map()
   window.__lorcaQueue = []
   window.__lorcaOpen = false
-  window.__lorcaWS.onopen = function() { window.__lorcaOpen = true; for (var i = 0; i < window.__lorcaQueue.length; i++) { window.__lorcaWS.send(window.__lorcaQueue[i]) } window.__lorcaQueue = [] }
-  window.__lorcaWS.onmessage = function(e) { var msg = JSON.parse(e.data); if (msg.type === 'result') { var cb = window.__lorcaPending.get(msg.name + ':' + msg.seq); if (cb) { if (msg.error) { cb.reject(new Error(msg.error)); } else { cb.resolve(msg.result); } window.__lorcaPending.delete(msg.name + ':' + msg.seq); } } }
+  function __lorcaSetupWS() {
+    var ws = new WebSocket('ws://127.0.0.1:__RELAY_PORT__')
+    window.__lorcaWS = ws
+    ws.onopen = function() { window.__lorcaOpen = true; for (var i = 0; i < window.__lorcaQueue.length; i++) { ws.send(window.__lorcaQueue[i]) } window.__lorcaQueue = [] }
+    ws.onmessage = function(e) { var msg = JSON.parse(e.data); if (msg.type === 'result') { var cb = window.__lorcaPending.get(msg.name + ':' + msg.seq); if (cb) { if (msg.error) { cb.reject(new Error(msg.error)); } else { cb.resolve(msg.result); } window.__lorcaPending.delete(msg.name + ':' + msg.seq); } } }
+    ws.onclose = function() { window.__lorcaOpen = false; window.__lorcaPending.forEach(function(cb) { cb.reject(new Error('relay reconnecting')) }); window.__lorcaPending = new Map(); window.__lorcaQueue = []; setTimeout(function() { if (!window.__lorcaWS || window.__lorcaWS.readyState > 1) { __lorcaSetupWS() } }, 500) }
+  }
+  __lorcaSetupWS()
 })()`
 
 type relay struct {
@@ -214,6 +224,15 @@ func (r *relay) handleClient(ws *websocket.Conn) {
 				raw := json.RawMessage(b)
 				msg.Result = &raw
 			}
+			// Marshal the full envelope outside the write lock. For large results
+			// the expensive json.Marshal(res) above already built the payload; this
+			// step only wraps it, but keeping allocations outside writeMu means the
+			// lock is held only for the actual network write.
+			msgBytes, marshalErr := json.Marshal(msg)
+			if marshalErr != nil {
+				log.Printf("lorca/relay: marshal envelope error for %s seq=%d: %v", name, seq, marshalErr)
+				return
+			}
 			// Snapshot the active client under the short metadata lock.
 			r.mu.Lock()
 			client := r.client
@@ -222,18 +241,22 @@ func (r *relay) handleClient(ws *websocket.Conn) {
 				// Result for a navigated-away page - discard.
 				return
 			}
-			// Acquire the write lock to send. Other result goroutines returning
-			// large payloads will queue here rather than blocking the metadata
-			// lock, so short results (e.g. getExistingData) are never starved.
+			// Acquire the write lock. defer ensures the mutex is released even if
+			// the Send call below panics, preventing a permanent deadlock.
 			r.writeMu.Lock()
+			defer r.writeMu.Unlock()
 			// Re-verify the client under mu in case it changed while we waited.
 			r.mu.Lock()
 			active := r.client == ws
 			r.mu.Unlock()
 			if active {
-				websocket.JSON.Send(client, msg) //nolint:errcheck
+				// Message.Send sends pre-marshaled bytes as a text frame, avoiding a
+				// redundant json.Marshal inside the write lock.
+				if err := websocket.Message.Send(client, string(msgBytes)); err != nil {
+					log.Printf("lorca/relay: send error for %s seq=%d: %v", name, seq, err)
+					client.Close()
+				}
 			}
-			r.writeMu.Unlock()
 		}()
 	}
 
