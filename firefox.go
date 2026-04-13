@@ -421,6 +421,10 @@ func newFirefoxWithArgs(binary string, args ...string) (*firefox, error) {
 		log.Printf("lorca/firefox: session.subscribe failed: %v", err)
 	}
 
+	// Apply the host executable's icon to Firefox's window on platforms that
+	// support it.  Runs in a background goroutine to avoid blocking startup.
+	go applyFirefoxWindowIcon(f.cmd.Process.Pid)
+
 	return f, nil
 }
 
