@@ -511,7 +511,7 @@ func (f *firefox) readLoop() {
 					f.Unlock()
 					if len(scripts) > 0 {
 						go func(scripts []string) {
-							combined := strings.Join(scripts, "\n")
+							combined := strings.Join(scripts, ";\n")
 							log.Printf("lorca/firefox: post-load re-eval %d script(s) in page realm", len(scripts))
 							if _, err := f.eval(combined); err != nil {
 								log.Printf("lorca/firefox: post-load eval error: %v", err)
@@ -561,7 +561,7 @@ func (f *firefox) readLoop() {
 					scripts := append([]string(nil), f.loadScripts...)
 					f.Unlock()
 					if len(scripts) > 0 {
-						combined := strings.Join(scripts, "\n")
+						combined := strings.Join(scripts, ";\n")
 						log.Printf("lorca/firefox: realmCreated realm=%s firing %d script(s) early (no-wait)", realmParams.Realm, len(scripts))
 						f.sendNoWait("script.evaluate", h{
 							"expression":      combined,
