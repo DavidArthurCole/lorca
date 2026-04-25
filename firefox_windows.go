@@ -4,6 +4,7 @@ package lorca
 
 import (
 	"log"
+	"os"
 	"syscall"
 	"time"
 	"unsafe"
@@ -87,6 +88,21 @@ func fxwDescendantPIDs(launcherPID int) map[uint32]bool {
 		}
 	}
 	return result
+}
+
+// killFirefoxProcessTree kills all descendant processes of launcherPID,
+// including orphaned children whose parent stub has already exited.
+func killFirefoxProcessTree(launcherPID int, state *os.ProcessState) {
+	pids := fxwDescendantPIDs(launcherPID)
+	for childPID := range pids {
+		if int(childPID) == launcherPID {
+			continue
+		}
+		_ = killProcessTree(int(childPID))
+	}
+	if state == nil || !state.Exited() {
+		_ = killProcessTree(launcherPID)
+	}
 }
 
 // applyFirefoxWindowIcon sets WM_SETICON on all top-level visible windows

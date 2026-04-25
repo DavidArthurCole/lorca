@@ -765,9 +765,7 @@ func (f *firefox) kill() {
 	f.pending = map[int]chan result{}
 	f.Unlock()
 
-	if state := f.cmd.ProcessState; state == nil || !state.Exited() {
-		killProcessTree(f.cmd.Process.Pid)
-	}
+	killFirefoxProcessTree(f.cmd.Process.Pid, f.cmd.ProcessState)
 }
 
 func (f *firefox) done() <-chan struct{} { return f.doneC }
