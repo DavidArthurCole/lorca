@@ -23,3 +23,17 @@ func applyFirefoxWindowIcon(_ int, _ string) {
 	// _NET_WM_ICON via X11 on Linux) and CGO is not permitted in this module.
 	// The Windows implementation lives in firefox_windows.go.
 }
+
+// applyFirefoxWindowTitle is a no-op on non-Windows platforms.
+// On Windows, it calls SetWindowTextW to override the Win32 window caption.
+func applyFirefoxWindowTitle(_ int, _ string) {
+	// Win32 SetWindowTextW is Windows-only; no equivalent cross-platform API
+	// is available without CGO. See firefox_windows.go.
+}
+
+// applyFirefoxWindowAUMID is a no-op on non-Windows platforms.
+// On Windows, it uses SHGetPropertyStoreForWindow to set the AUMID on the
+// Firefox window so it groups separately in the taskbar (see firefox_windows.go).
+func applyFirefoxWindowAUMID(_ int, _ string) {
+	// IPropertyStore/SHGetPropertyStoreForWindow is Windows-only. See firefox_windows.go.
+}

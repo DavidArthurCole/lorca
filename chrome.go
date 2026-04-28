@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"os/exec"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -37,16 +38,18 @@ type msg struct {
 
 type chrome struct {
 	sync.Mutex
-	wsMu      sync.Mutex // serializes websocket writes
-	cmd       *exec.Cmd
-	ws        *websocket.Conn
-	id        int32
-	target    string
-	session   string
-	window    int
-	pending   map[int]chan result
-	debugPort int
-	doneC     chan struct{}
+	wsMu         sync.Mutex // serializes websocket writes
+	cmd          *exec.Cmd
+	ws           *websocket.Conn
+	id           int32
+	target       string
+	session      string
+	window       int
+	pending      map[int]chan result
+	debugPort    int
+	doneC        chan struct{}
+	appURL       string // URL set by load(); used to redirect back-navigation
+	blockBackNav bool   // when true, navigations away from appURL are redirected back
 }
 
 type browserVersion struct {
@@ -319,6 +322,32 @@ func (c *chrome) readLoop() {
 				log.Println(params.Message)
 			}
 
+			if res.Method == "Page.frameNavigated" {
+				c.Lock()
+				blockBackNav := c.blockBackNav
+				appURL := c.appURL
+				c.Unlock()
+				if blockBackNav && appURL != "" {
+					var navEvent struct {
+						Params struct {
+							Frame struct {
+								URL string `json:"url"`
+							} `json:"frame"`
+						} `json:"params"`
+					}
+					if json.Unmarshal([]byte(params.Message), &navEvent) == nil {
+						navURL := navEvent.Params.Frame.URL
+						if !strings.HasPrefix(navURL, appURL) {
+							go func(redirectURL string) {
+								if _, err := c.send("Page.navigate", h{"url": redirectURL}); err != nil {
+									log.Printf("lorca/chrome: redirect to appURL failed: %v", err)
+								}
+							}(appURL)
+						}
+					}
+				}
+			}
+
 			c.Lock()
 			resc, ok := c.pending[res.ID]
 			delete(c.pending, res.ID)
@@ -383,8 +412,21 @@ func (c *chrome) send(method string, params h) (json.RawMessage, error) {
 
 func (c *chrome) load(url string) error {
 	_, err := c.send("Page.navigate", h{"url": url})
+	if err == nil {
+		c.Lock()
+		c.appURL = url
+		c.Unlock()
+	}
 	return err
 }
+
+func (c *chrome) setBlockBackNavigation(enable bool) {
+	c.Lock()
+	c.blockBackNav = enable
+	c.Unlock()
+}
+
+func (c *chrome) setAppUserModelID(_ string) {}
 
 func (c *chrome) eval(expr string) (json.RawMessage, error) {
 	return c.send("Runtime.evaluate", h{"expression": expr, "awaitPromise": true, "returnByValue": true})

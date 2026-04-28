@@ -259,7 +259,7 @@ func TestBindingScriptInvariants(t *testing.T) {
 // preload fires). It checks that .length is readable on each handler from
 // page-realm code (script.evaluate). When functions are sandbox-realm,
 // Firefox's Xray wrapper throws "Permission denied to access property 'length'"
-// whenever page code inspects them, which is exactly what broke EggLedger.
+// whenever page code inspects them.
 func TestFirefoxBootstrapFunctionsPageRealm(t *testing.T) {
 	binary := skipIfNoFirefox(t)
 	r, err := newRelay()
@@ -345,7 +345,7 @@ func TestFirefoxBindingScriptPageRealm(t *testing.T) {
 	}
 }
 
-// TestFirefoxBindingBasic is an end-to-end test for a single Go→JS→Go binding
+// TestFirefoxBindingBasic is an end-to-end test for a single Go->JS->Go binding
 // call under Firefox. This is the scenario that silently hangs when bindings
 // land in sandbox realm: the JS Promise never resolves, Eval never returns.
 func TestFirefoxBindingBasic(t *testing.T) {
