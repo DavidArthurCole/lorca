@@ -66,7 +66,6 @@ var defaultChromeArgs = []string{
 	"--password-store=basic",
 	"--use-mock-keychain",
 	"--remote-allow-origins=*",
-	"--enable-logging --v=1",
 }
 
 // BrowserHint tells NewWithBrowser which browser backend to use.
@@ -129,8 +128,13 @@ func NewWithBrowser(url, dir, preferPath string, width, height int, hint Browser
 		}
 		args := append(append([]string{}, defaultFirefoxArgs...),
 			"--profile", dir,
-			fmt.Sprintf("--window-size=%d,%d", width, height),
 		)
+		if width > 0 {
+			args = append(args, fmt.Sprintf("--width=%d", width))
+		}
+		if height > 0 {
+			args = append(args, fmt.Sprintf("--height=%d", height))
+		}
 		args = append(args, customArgs...)
 		args = append(args, url)
 		browser, err = newFirefoxWithArgs(binary, appIconPath, args...)
@@ -296,21 +300,12 @@ func setupFirefoxProfile(dir, appName, iconPath string) error {
 	if err := os.MkdirAll(chromeDir, 0755); err != nil {
 		return err
 	}
-	// Hide the navigation bar (address bar, back/forward, extensions, hamburger,
-	// profile/sign-in) and bookmarks/menu bars.
-	//
-	// Do NOT hide #TabsToolbar itself: on Windows with inTitlebar=1 (the default
-	// integrated mode), Firefox renders the min/max/close buttons inside
-	// #TabsToolbar.  Hiding the entire toolbar removes the window controls.
-	// Instead, hide only the scrollbox that contains the tabs; the toolbar
-	// container stays in place and continues to host the window control buttons
-	// and serve as the window drag region.
+	// Hide nav/bookmarks/menu bars. #TabsToolbar is kept (not hidden) because on
+	// Windows it hosts the min/max/close buttons and window drag region.
 	css := "#nav-bar { display: none !important; }\n" +
 		"#PersonalToolbar { display: none !important; }\n" +
 		"#toolbar-menubar { display: none !important; }\n" +
-		// Hide the tab scrollbox (contains the actual tab elements) and the
-		// individual buttons that surround it.  The toolbar container itself
-		// (#TabsToolbar) is intentionally kept so window controls remain visible.
+		// Hide tab scrollbox contents; keep #TabsToolbar for window controls.
 		"#tabbrowser-arrowscrollbox { display: none !important; }\n" +
 		".tabbrowser-tab { display: none !important; }\n" +
 		"#new-tab-button { display: none !important; }\n" +
@@ -318,86 +313,63 @@ func setupFirefoxProfile(dir, appName, iconPath string) error {
 		"toolbarbutton[command=\"cmd_newNavigatorTab\"] { display: none !important; }\n" +
 		"#alltabs-button { display: none !important; }\n" +
 		"#firefox-view-button { display: none !important; }\n" +
-		// Hide any remaining separators and flexible spacers in the tab strip.
-		// Hiding all tab content can leave toolbarseparator and toolbarspring
-		// elements visible as dividing lines; suppress them here.
-		"#TabsToolbar toolbarseparator { display: none !important; }\n" +
-		"#TabsToolbar toolbarspring { display: none !important; }\n" +
-		// Collapse the tab container to zero size without removing it from layout.
-		// display:none would prevent Firefox's internal tab-switching code from
-		// updating the selected-tab state, leaving the content area gray after
-		// any context change (e.g. Ctrl+T close).  Instead, shrink it to nothing
-		// via max-width/max-height+overflow so Firefox can still manipulate it
-		// internally while it occupies no visible space in the toolbar.
+		// toolbarseparator is toolbar-only (not menus), safe to hide globally.
+		"toolbarseparator { display: none !important; }\n" +
+		"toolbarspring { display: none !important; }\n" +
+		// Collapse #tabbrowser-tabs via max-width/overflow instead of display:none;
+		// display:none breaks Firefox's internal tab-switching state (gray content area).
+		// Inline borders/padding also need zeroing - max-width:0+overflow:hidden won't suppress them.
 		"#tabbrowser-tabs { flex: none !important; -moz-box-flex: 0 !important; " +
 		"max-width: 0 !important; min-width: 0 !important; " +
-		"max-height: 0 !important; overflow: hidden !important; }\n" +
-		// titlebar-placeholder is an invisible element that mirrors the caption
-		// button area on the opposite side of the titlebar.  Hide it so it does
-		// not add an extra flex child that shifts content off-center.
+		"max-height: 0 !important; overflow: hidden !important; " +
+		"border: none !important; border-inline-start: none !important; " +
+		"padding: 0 !important; padding-inline-start: 0 !important; " +
+		"margin: 0 !important; margin-inline-start: 0 !important; }\n" +
+		// XUL splitters reserve space even with display:none; width:0 is required too.
+		"#vertical-pinned-tabs-splitter { display: none !important; " +
+		"width: 0 !important; min-width: 0 !important; }\n" +
 		".titlebar-placeholder { display: none !important; }\n" +
-		// titlebar-spacer appears in some Firefox versions between tab elements
-		// and the window controls; hide it for the same reason.
 		".titlebar-spacer { display: none !important; }\n" +
-		// Sidebar: hide both the pre-131 sidebar panel and the 131+ revamp launcher.
-		// Keyboard shortcuts that target the sidebar (Ctrl+H, Ctrl+B, etc.) will
-		// still be processed by Firefox but produce no visible result.
-		//
-		// The splitter needs both display:none AND explicit width:0 because in some
-		// Firefox versions the XUL layout system reserves space for the splitter even
-		// when display:none is applied, leaving a visible vertical line.  Targeting
-		// by class (.sidebar-splitter) in addition to ID covers Firefox 131+ where
-		// the element ID may differ.  #browser>splitter catches any unnamed splitter
-		// that is a direct child of the browser flex container.
+		// Sidebar: both pre-131 panel and 131+ revamp launcher. Splitters need width:0 too.
 		"#sidebar-main { display: none !important; width: 0 !important; min-width: 0 !important; }\n" +
 		"#sidebar-box { display: none !important; width: 0 !important; min-width: 0 !important; }\n" +
 		"#sidebar-splitter, .sidebar-splitter { display: none !important; width: 0 !important; min-width: 0 !important; }\n" +
 		"#browser > splitter { display: none !important; width: 0 !important; min-width: 0 !important; }\n" +
 		"#sidebar-button { display: none !important; }\n" +
-		// Disable keyboard shortcuts that would open new tabs or windows.
-		// Targeting the XUL <key> element via CSS display:none prevents Firefox
-		// from processing the shortcut.  Belt-and-suspenders alongside the BiDi
-		// browsingContext.contextCreated close in firefox.go.
+		// Disable new-tab/new-window shortcuts; command-attr selectors cover CustomizableUI re-insertions.
 		"#key_newNavigatorTab { display: none !important; }\n" +
 		"#key_newNavigatorTabNoEvent { display: none !important; }\n" +
 		"#key_newNavigatorWindow { display: none !important; }\n" +
-		// Suppress right-click context menus on the tab strip and toolbar.
+		"key[command=\"cmd_newNavigatorTab\"] { display: none !important; }\n" +
+		"key[command=\"cmd_newNavigatorTabNoEvent\"] { display: none !important; }\n" +
+		"key[command=\"cmd_newNavigatorWindow\"] { display: none !important; }\n" +
+		// Suppress toolbar/tab-strip context menus.
 		"#toolbar-context-menu { display: none !important; }\n" +
 		"#tabContextMenu { display: none !important; }\n" +
-		// Page right-click context menu: hide bookmark-star and AI chatbot entries.
-		// Hide both the separator before AND after the chatbot item so neither an
-		// empty gap nor a double-separator is left when the chatbot row is hidden.
+		// Page context menu: hide bookmark-star and AI chatbot (plus adjacent separators).
 		"#context-bookmarkpage { display: none !important; }\n" +
 		"#context-ask-chat { display: none !important; }\n" +
 		"menuseparator:has(+ #context-ask-chat) { display: none !important; }\n" +
 		"#context-ask-chat + menuseparator { display: none !important; }\n"
 
-	// Show the app name (and optionally an icon) inside the otherwise-empty tab
-	// strip so the user can see what app is running.  The label is draggable so
-	// it also serves as a window-drag region alongside the window control buttons.
-	// Force CSS flexbox on #TabsToolbar so that the ::before pseudo-element's
-	// "flex: 1" is honoured.  The default XUL box model ignores the CSS flex
-	// property on generated content, so without this the ::before only gets its
-	// intrinsic (text) width and does not fill the toolbar.
-	css += "#TabsToolbar { display: flex !important; align-items: center !important; }\n"
+	// #TabsToolbar: CSS flex so ::before flex:1 is honoured (XUL box ignores it on generated content).
+	// min-height:0 prevents --tabstrip-min-height (44px) from leaving a gap above caption buttons.
+	css += "#TabsToolbar { display: flex !important; align-items: center !important; min-height: 0 !important; }\n" +
+		".toolbar-items { display: none !important; }\n"
 
 	if appName != "" {
-		// Escape backslashes and double-quotes so the value is safe inside a
-		// CSS string literal (e.g. content: "My App").
+		// Escape for CSS string literal.
 		escapedName := strings.ReplaceAll(appName, `\`, `\\`)
 		escapedName = strings.ReplaceAll(escapedName, `"`, `\"`)
 
-		// Try to extract a 16x16 (or smallest available) PNG from the .ico file.
-		// Using background-image (rather than content: url()) allows explicit
-		// sizing via background-size, avoiding the oversized-icon problem.
+		// Extract smallest PNG from .ico; background-image allows explicit sizing unlike content:url().
 		iconCSS := ""
 		paddingStart := "8px"
 		if iconPath != "" {
 			if png := extractSmallPNGFromICO(iconPath); png != nil {
 				iconFile := filepath.Join(chromeDir, "app-icon.png")
 				if os.WriteFile(iconFile, png, 0644) == nil {
-					// Icon sits in the left padding; text starts after it.
-					// 8px outer gap + 16px icon + 6px inner gap = 30px total.
+					// 8px gap + 16px icon + 6px gap = 30px total padding-start.
 					iconCSS = "background-image: url(\"app-icon.png\"); " +
 						"background-size: 16px 16px; " +
 						"background-repeat: no-repeat; " +
@@ -418,17 +390,17 @@ func setupFirefoxProfile(dir, appName, iconPath string) error {
 		return err
 	}
 	userJS := "user_pref(\"toolkit.legacyUserProfileCustomizations.stylesheets\", true);\n" +
-		// Disable the Firefox 131+ sidebar revamp (the icon strip on the left).
-		// Without this the sidebar launcher persists even when #sidebar-main is hidden.
+		// Disable the 131+ sidebar revamp; without this it persists even when #sidebar-main is hidden.
 		"user_pref(\"sidebar.revamp\", false);\n" +
-		// Clear any tools registered in the new sidebar so nothing re-enables it.
 		"user_pref(\"sidebar.main.tools\", \"\");\n" +
-		// Disable vertical tabs and force sidebar to hidden state so that the
-		// XUL layout does not reserve any width for the sidebar or its splitter.
 		"user_pref(\"sidebar.verticalTabs\", false);\n" +
 		"user_pref(\"sidebar.visibility\", \"hide-sidebar\");\n" +
-		// Disable the AI chatbot feature (removes it from sidebar and context menu).
 		"user_pref(\"browser.ml.chat.enabled\", false);\n"
+	// Enable Firefox devtools when LORCA_DEVTOOLS is set; lost on every fresh-profile launch.
+	if os.Getenv("LORCA_DEVTOOLS") != "" {
+		userJS += "user_pref(\"devtools.chrome.enabled\", true);\n" +
+			"user_pref(\"devtools.debugger.remote-enabled\", true);\n"
+	}
 	return os.WriteFile(filepath.Join(dir, "user.js"), []byte(userJS), 0644)
 }
 

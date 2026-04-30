@@ -80,10 +80,9 @@ func bidiValueToJSON(v json.RawMessage) (json.RawMessage, error) {
 	}
 }
 
-// bidiConn is a minimal WebSocket client for the Firefox WebDriver BiDi
-// protocol. golang.org/x/net/websocket always sends an Origin header which
-// Firefox's /session endpoint rejects with 400 Bad Request, so we implement
-// our own handshake and RFC 6455 text-frame framing.
+// bidiConn is a minimal WebSocket client for the Firefox BiDi protocol.
+// We avoid golang.org/x/net/websocket because it always sends an Origin header
+// that Firefox's /session endpoint rejects with 400 Bad Request.
 type bidiConn struct {
 	conn    net.Conn
 	br      *bufio.Reader
@@ -147,9 +146,7 @@ func (c *bidiConn) handshake(host, path string) error {
 	return nil
 }
 
-// writeFrame encodes a single WebSocket frame with the given opcode and
-// masked payload and writes it to the connection. All client frames must
-// be masked per RFC 6455 section 5.3.
+// writeFrame sends a masked WebSocket frame (RFC 6455 §5.3: all client frames must be masked).
 func (c *bidiConn) writeFrame(opcode byte, payload []byte) error {
 	plen := len(payload)
 	var header []byte
@@ -259,23 +256,24 @@ func (c *bidiConn) Close() error {
 
 type firefox struct {
 	sync.Mutex
-	cmd         *exec.Cmd
-	bidi        *bidiConn
-	id          int32
-	context     string // WebDriver BiDi browsing context ID
-	pending     map[int]chan result
-	doneC       chan struct{}
-	doneOnce    sync.Once
-	lastBounds  Bounds
-	debugPort   int
-	loadScripts  []string // scripts re-eval'd in page realm on every browsingContext.load
-	appURL       string   // URL set by load(); used to redirect back-navigation
-	blockBackNav bool     // when true, navigations away from appURL are redirected back
+	cmd            *exec.Cmd
+	bidi           *bidiConn
+	id             int32
+	context        string // WebDriver BiDi browsing context ID
+	pending        map[int]chan result
+	doneC          chan struct{}
+	doneOnce       sync.Once
+	watchdogDoneC  chan struct{}
+	watchdogOnce   sync.Once
+	lastBounds     Bounds
+	debugPort      int
+	loadScripts    []string // scripts re-eval'd in page realm on every browsingContext.load
+	appURL         string   // URL set by load(); used to redirect back-navigation
+	blockBackNav   bool     // when true, navigations away from appURL are redirected back
 }
 
-// closeDone closes doneC exactly once.  It is called by readLoop on exit so
-// that callers blocking on Done() are unblocked when the BiDi connection drops
-// (i.e. when the real Firefox process closes), not when the launcher stub exits.
+// closeDone closes doneC exactly once, signalling that the real Firefox process is gone.
+// Called by readLoop so Done() reflects BiDi connection drop, not the launcher stub exit.
 func (f *firefox) closeDone() {
 	f.doneOnce.Do(func() { close(f.doneC) })
 }
@@ -298,7 +296,7 @@ func newFirefoxWithArgs(binary string, iconPath string, args ...string) (*firefo
 		return nil, err
 	}
 
-	// Poll /json/version until Firefox is ready (same retry loop as Chrome).
+	// Poll /json/version until Firefox is ready.
 	startTime := time.Now()
 	var res *http.Response
 	for {
@@ -319,8 +317,8 @@ func newFirefoxWithArgs(binary string, iconPath string, args ...string) (*firefo
 		return nil, err
 	}
 
-	// Firefox responds with HTML at /json/version rather than JSON.
-	// Ignore parse errors and always use the /session BiDi endpoint.
+	// Firefox returns HTML (not JSON) at /json/version; ignore parse errors.
+	// Use WebSocketDebuggerUrl if present, otherwise fall back to /session.
 	var ver browserVersion
 	_ = json.Unmarshal(body, &ver)
 
@@ -332,9 +330,6 @@ func newFirefoxWithArgs(binary string, iconPath string, args ...string) (*firefo
 			return nil, err
 		}
 	} else {
-		// Firefox's BiDi WebSocket lives at /session. The golang.org/x/net/websocket
-		// library always sends an Origin header which Firefox rejects; we use our own
-		// bidiConn that omits the Origin header entirely.
 		wsLoc = &url.URL{
 			Scheme: "ws",
 			Host:   fmt.Sprintf("127.0.0.1:%d", debugPort),
@@ -400,19 +395,17 @@ func newFirefoxWithArgs(binary string, iconPath string, args ...string) (*firefo
 	}
 
 	f.doneC = make(chan struct{})
+	f.watchdogDoneC = make(chan struct{})
 	go func() {
+		// On Windows, firefox.exe is a launcher stub that exits immediately.
+		// doneC is closed by readLoop (BiDi drop), not here.
 		err := f.cmd.Wait()
-		// On Windows, firefox.exe is a launcher stub: it starts the real Firefox
-		// child process and exits immediately (exit 0).  cmd.Wait() therefore
-		// returns at once, long before the UI is ready.  We do NOT close doneC
-		// here; it is closed by readLoop when the BiDi connection drops, which
-		// correctly reflects when the real Firefox process is gone.
 		log.Printf("lorca/firefox: launcher process exited err=%v state=%v", err, f.cmd.ProcessState)
 	}()
 	go f.readLoop()
+	go f.contextWatchdog()
 
-	// readLoop is now running; f.send can safely be used.
-	// Subscribe to console logs, navigation events, and realm creation for diagnostics.
+	// Subscribe to events needed for tab management, script injection, and nav blocking.
 	if _, err := f.send("session.subscribe", h{"events": []string{
 		"log.entryAdded",
 		"browsingContext.navigationStarted",
@@ -449,19 +442,16 @@ func (f *firefox) send(method string, params h) (json.RawMessage, error) {
 	return res.Value, res.Err
 }
 
-// sendNoWait sends a BiDi command and immediately returns without waiting for
-// a response.  The response, when it arrives, is silently discarded by
-// readLoop (no entry in f.pending).  This is safe to call from within
-// readLoop because bidiConn.Send uses a separate write mutex.
+// sendNoWait sends a BiDi command without waiting for a response (response is discarded).
+// Safe to call from within readLoop because bidiConn.Send uses a separate write mutex.
 func (f *firefox) sendNoWait(method string, params h) {
 	id := int(atomic.AddInt32(&f.id, 1))
 	// Intentionally no f.pending entry -response is dropped.
 	_ = f.bidi.Send(h{"id": id, "method": method, "params": params})
 }
 
-// bidiMsg is the shape of every message Firefox sends over the BiDi WebSocket.
-// BiDi error responses have "error" as a string error-code (e.g. "unknown error")
-// and a separate top-level "message" string -NOT a nested {"message":"..."} object.
+// bidiMsg is every message Firefox sends over BiDi. Error responses use a top-level
+// "error" string code and a separate "message" string (not a nested object).
 type bidiMsg struct {
 	ID      int             `json:"id"`
 	Result  json.RawMessage `json:"result"`
@@ -472,9 +462,6 @@ type bidiMsg struct {
 }
 
 func (f *firefox) readLoop() {
-	// Signal doneC when the BiDi connection drops.  This is the authoritative
-	// signal that Firefox is gone: on Windows the cmd.Wait() goroutine fires
-	// immediately (launcher stub exits), so we cannot rely on it.
 	defer f.closeDone()
 	for {
 		var m bidiMsg
@@ -485,16 +472,9 @@ func (f *firefox) readLoop() {
 		if m.Method != "" {
 			switch m.Method {
 			case "browsingContext.contextCreated":
-				// A new top-level context was created (Ctrl+T, Ctrl+N, etc.).
-				// lorca is a single-page app host: there is never a legitimate reason
-				// to have more than one browsing context.  Close the new context
-				// unconditionally (no blockBackNav gate) so that keyboard shortcuts
-				// like Ctrl+T cannot escape the app.
-				//
-				// Two-pronged close: (1) sendNoWait with the event's context ID for
-				// the fastest possible response, and (2) a goroutine that queries the
-				// live tree via getTree in case Firefox replaced the context ID before
-				// our first close arrived.
+				// lorca is single-page: close any new top-level context immediately.
+				// Two-pronged: sendNoWait for speed, then getTree in a goroutine in
+				// case Firefox replaced the context ID before our close arrived.
 				var ctxParams struct {
 					Context string `json:"context"`
 					Parent  string `json:"parent"`
@@ -504,17 +484,15 @@ func (f *firefox) readLoop() {
 					mainCtx := f.context
 					f.Unlock()
 					if ctxParams.Parent == "" && ctxParams.Context != mainCtx {
+						// contextCreated is firing reliably — the watchdog is no longer needed.
+						f.stopWatchdog()
 						f.sendNoWait("browsingContext.close", h{
 							"context":      ctxParams.Context,
 							"promptUnload": false,
 						})
 						go func(main string) {
 							f.closeStrayContexts(main)
-							// Re-activate the main context.  Without this Firefox may
-							// leave the content area blank after the new context closes.
-							// browsingContext.activate is the correct command; if it is
-							// unsupported by the running Firefox version, fall back to
-							// window.focus() evaluated in the main page realm.
+							// Re-activate main context; without this Firefox may leave the content area blank.
 							if _, err := f.send("browsingContext.activate", h{"context": main}); err != nil {
 								log.Printf("lorca/firefox: activate main context: %v (falling back to window.focus)", err)
 								f.sendNoWait("script.evaluate", h{
@@ -533,10 +511,24 @@ func (f *firefox) readLoop() {
 				}{}
 				json.Unmarshal(m.Params, &params)
 				if params.Context == f.context {
-					log.Printf("lorca/firefox: main context destroyed -killing")
+					log.Printf("lorca/firefox: main context destroyed - killing")
 					f.kill()
 					return
 				}
+				// Stray context destroyed; re-activate main so it gets focus.
+				go func() {
+					f.Lock()
+					main := f.context
+					f.Unlock()
+					if _, err := f.send("browsingContext.activate", h{"context": main}); err != nil {
+						f.sendNoWait("script.evaluate", h{
+							"expression":      "window.focus(); void 0",
+							"awaitPromise":    false,
+							"target":          h{"context": main},
+							"resultOwnership": "none",
+						})
+					}
+				}()
 			case "log.entryAdded":
 				// console output from the page - silently ignored
 			case "browsingContext.navigationStarted":
@@ -564,16 +556,8 @@ func (f *firefox) readLoop() {
 					}
 				}
 			case "browsingContext.load":
-				// Re-eval all scripts (bootstrap first, then bindings) in the page
-				// window realm via a single script.evaluate call.  f.eval targets the
-				// page window realm via target:{context}, creating page-realm objects.
-				// Combining into one call avoids 50+ round-trips and is faster.
-				//
-				// A goroutine is used because f.eval calls f.send which blocks waiting
-				// for readLoop to deliver the response - calling it inline would deadlock.
-				//
-				// Belt-and-suspenders: if a non-main context has loaded (i.e. a new
-				// tab or window that survived the contextCreated handler), close it here.
+				// Re-eval all loadScripts in the page realm as a single call (belt-and-suspenders
+				// after realmCreated). Goroutine required: f.eval blocks on readLoop response.
 				var loadParams struct {
 					Context string `json:"context"`
 				}
@@ -591,28 +575,10 @@ func (f *firefox) readLoop() {
 					}
 				}
 			case "script.realmCreated":
-				// When the real-origin window realm (origin != null) is created for
-				// our context, immediately send all loadScripts (bootstrap first, then
-				// bindings) as a single script.evaluate, without spawning a goroutine
-				// or waiting for a response.
-				//
-				// loadScripts contains all scripts that must run in the page window realm
-				// on every page load: the bootstrap (window.__lorcaWS etc.) followed by
-				// the binding functions.  Since no preloads are registered, none of these
-				// objects are sandbox-realm - they are only ever created by script.evaluate
-				// with target:{context}, which always resolves to the page window realm.
-				//
-				// We send here (no goroutine) so the evaluate is queued in the BiDi
-				// send buffer immediately.  The module bundle must still be fetched over
-				// localhost before Vue runs, giving us a window to get ahead.
-				//
-				// Post-load re-eval (browsingContext.load handler) is the unconditional
-				// fallback if this race is lost.
-				//
-				// NOTE: No script.addPreloadScript is registered anywhere in this code
-				// path, so there are no preload sandbox realms to worry about.  The
-				// Sandbox check below is a safety guard in case addPreloadScript is
-				// added in the future.
+				// When the real-origin window realm is created, immediately fire all
+				// loadScripts via sendNoWait to win the race against page scripts.
+				// Only targets the page realm (sandbox=="" guard protects against future
+				// addPreloadScript use). browsingContext.load is the unconditional fallback.
 				var realmParams struct {
 					Realm   string `json:"realm"`
 					Origin  string `json:"origin"`
@@ -726,14 +692,42 @@ func (f *firefox) setBlockBackNavigation(enable bool) {
 	f.Unlock()
 }
 
-// closeStrayContexts queries the live browsing-context tree and closes every
-// top-level context that is not mainCtx.  Called from a goroutine whenever a
-// new context is detected; using getTree avoids the "no such frame" error that
-// occurs when Firefox replaces the created context ID before the close arrives.
-func (f *firefox) closeStrayContexts(mainCtx string) {
+// stopWatchdog signals the contextWatchdog goroutine to exit (idempotent via sync.Once).
+func (f *firefox) stopWatchdog() {
+	f.watchdogOnce.Do(func() { close(f.watchdogDoneC) })
+}
+
+// contextWatchdog polls getTree to close stray contexts. It is a fallback for a
+// Firefox BiDi bug where contextCreated is not fired for the first Ctrl+T/Ctrl+N tab.
+// Once a stray is found, contextCreated becomes reliable and the watchdog stops itself.
+func (f *firefox) contextWatchdog() {
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-f.doneC:
+			return
+		case <-f.watchdogDoneC:
+			return
+		case <-ticker.C:
+			f.Lock()
+			main := f.context
+			f.Unlock()
+			if f.closeStrayContexts(main) {
+				// A stray was found and closed; contextCreated is now reliable.
+				f.stopWatchdog()
+				return
+			}
+		}
+	}
+}
+
+// closeStrayContexts closes every top-level context that is not mainCtx, returning
+// true if at least one was closed. Uses getTree to avoid "no such frame" races.
+func (f *firefox) closeStrayContexts(mainCtx string) bool {
 	raw, err := f.send("browsingContext.getTree", h{})
 	if err != nil {
-		return
+		return false
 	}
 	var tree struct {
 		Contexts []struct {
@@ -741,8 +735,9 @@ func (f *firefox) closeStrayContexts(mainCtx string) {
 		} `json:"contexts"`
 	}
 	if err := json.Unmarshal(raw, &tree); err != nil {
-		return
+		return false
 	}
+	closed := false
 	for _, ctx := range tree.Contexts {
 		if ctx.Context == mainCtx {
 			continue
@@ -752,50 +747,24 @@ func (f *firefox) closeStrayContexts(mainCtx string) {
 			"promptUnload": false,
 		}); err != nil {
 			log.Printf("lorca/firefox: closeStrayContexts: close %s failed: %v", ctx.Context, err)
+		} else {
+			closed = true
 		}
 	}
+	return closed
 }
 
 func (f *firefox) setAppUserModelID(id string) {
-	displayName := id
-	if dot := strings.IndexByte(id, '.'); dot >= 0 {
-		displayName = id[:dot]
-	}
 	go applyFirefoxWindowAUMID(f.cmd.Process.Pid, id)
-	// Apply the Win32 caption repeatedly; Firefox calls SetWindowTextW when
-	// the page title commits (adding " - Mozilla Firefox"), overwriting ours.
-	// Multiple attempts cover fast and slow page-load paths alike.
-	go func(pid int, title string) {
-		for _, delay := range []time.Duration{1000, 2500, 5000, 10000} {
-			time.Sleep(delay * time.Millisecond)
-			applyFirefoxWindowTitle(pid, title)
-		}
-	}(f.cmd.Process.Pid, displayName)
 }
 
 func (f *firefox) injectScript(js string) error {
-	// Do NOT register this script via script.addPreloadScript.  Preload scripts
-	// run in a BiDi sandbox realm, and ALL objects created there (including
-	// bootstrap objects like window.__lorcaWS, window.__lorcaWS.onopen, and
-	// window.__lorcaWS.onmessage) are sandbox-realm objects.  If app code (e.g.
-	// Vue's reactivity system) puts any of those objects into a reactive context
-	// and checks .length on the event handler functions, Firefox throws
-	// "Permission denied to access property 'length'" via Xray.
-	//
-	// Confirmed dead ends:
-	//   - script.addPreloadScript directly: sandbox-realm
-	//   - <script> element appended from preload sandbox: also sandbox-realm
-	//   - window.eval(), new window.Function() from preload: sandbox-realm
-	//   - exportFunction: not available in BiDi preloads
-	//   - document.write: aborts browsingContext.navigate with "Address rejected"
-	//
-	// Instead, store the script in loadScripts.  It will be re-evaluated in the
-	// page window realm on every realmCreated / browsingContext.load event, which
-	// fires early enough to win the race against page scripts most of the time,
-	// and is unconditionally correct after page load completes.
+	// Scripts must run in the page window realm, not a BiDi preload sandbox realm.
+	// Preload sandbox objects trigger Firefox Xray "Permission denied to access property
+	// 'length'" when Vue's reactivity system introspects them. Store in loadScripts
+	// instead; realmCreated and browsingContext.load re-eval it in the page realm.
 	f.Lock()
-	// Prepend so this script runs before any binding scripts (binding scripts
-	// reference window.__lorcaWS etc. which must exist first).
+	// Prepend so bootstrap runs before binding scripts that depend on window.__lorcaWS.
 	f.loadScripts = append([]string{js}, f.loadScripts...)
 	f.Unlock()
 	_, err := f.eval(js)
@@ -808,34 +777,14 @@ func (f *firefox) injectScript(js string) error {
 func (f *firefox) injectBinding(name string) error {
 	code := bindingScript(name)
 
-	// Do NOT inject binding functions via script.addPreloadScript.  Preload
-	// scripts run in a BiDi sandbox realm isolated from the page realm via
-	// Firefox's Xray wrappers.  Any function objects created in that sandbox
-	// cause "Permission denied to access property 'length'" when page-realm
-	// code (e.g. Vue's reactivity system) introspects them.  This applies even
-	// to <script> elements appended from the sandbox (also sandbox-realm per
-	// confirmed testing) and to the bootstrap itself.
-	//
-	// Binding scripts are stored in loadScripts (alongside the bootstrap, which
-	// is stored there by injectScript).  They are installed in page-realm by two
-	// mechanisms:
-	//   1. script.realmCreated handler: fires sendNoWait for all loadScripts
-	//      as soon as the real-origin window realm is created.  Wins the race vs
-	//      Vue most of the time; if it loses, Vue sees undefined (no error).
-	//   2. browsingContext.load handler: unconditional page-realm eval of all
-	//      loadScripts after every page load (belt-and-suspenders).
-
-	// Store for both realmCreated early-eval and post-load re-eval.
+	// Same page-realm constraint as injectScript: store in loadScripts so
+	// realmCreated and browsingContext.load install it on every navigation.
 	f.Lock()
 	f.loadScripts = append(f.loadScripts, code)
 	f.Unlock()
 
-	// Fire-and-forget immediate eval on the current page so the binding is
-	// available right away without blocking the caller for a round trip.
-	// With 50+ bindings registered at startup, blocking evals add up to
-	// 10+ seconds of lag.  Errors are silently dropped; realmCreated /
-	// browsingContext.load provide authoritative re-installation on every
-	// navigation.
+	// Fire-and-forget eval on current page so the binding is available immediately.
+	// Non-blocking (sendNoWait) because 50+ bindings at startup would add >10s of lag.
 	f.sendNoWait("script.evaluate", h{
 		"expression":      code,
 		"awaitPromise":    false,
@@ -856,10 +805,9 @@ func (f *firefox) setBounds(b Bounds) error {
 		log.Printf("lorca/firefox: SetBounds WindowState=%q not supported", b.WindowState)
 	}
 	if b.Width > 0 || b.Height > 0 {
-		if _, err := f.send("browsingContext.setViewport", h{
-			"context":  f.context,
-			"viewport": h{"width": b.Width, "height": b.Height},
-		}); err != nil {
+		// window.resizeTo sets the outer window dimensions without locking the
+		// viewport (unlike browsingContext.setViewport which prevents resizing).
+		if _, err := f.eval(fmt.Sprintf("window.resizeTo(%d,%d)", b.Width, b.Height)); err != nil {
 			return err
 		}
 		f.Lock()
@@ -885,12 +833,8 @@ func (f *firefox) bounds() (Bounds, error) {
 func (f *firefox) kill() {
 	log.Printf("lorca/firefox: kill() called")
 	if f.bidi != nil {
-		// Ask Firefox to exit gracefully before we force-close the connection.
-		// sendNoWait does not block; the response (if any) is dropped by readLoop.
 		f.sendNoWait("browser.close", h{})
-		// Give Firefox a brief window to handle the command before we tear down
-		// the BiDi connection and kill the process tree.
-		time.Sleep(150 * time.Millisecond)
+		time.Sleep(150 * time.Millisecond) // brief window for graceful exit
 		f.bidi.Close()
 	}
 	f.Lock()

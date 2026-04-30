@@ -12,21 +12,10 @@ import (
 	"golang.org/x/net/websocket"
 )
 
-// bindingScript returns the JS that installs window[name] as a relay-backed
-// binding function.  The generated code is safe to inject in any realm
-// (Chrome page realm via Page.addScriptToEvaluateOnNewDocument, or Firefox
-// page realm via script.evaluate / post-load re-eval).
-//
-// On Firefox, binding functions MUST be installed in the page realm (not the
-// BiDi preload sandbox realm) because page-realm code (e.g. Vue's reactivity
-// system) checks .length on functions it encounters, and accessing .length
-// on a sandbox-realm function throws "Permission denied to access property
-// 'length'" via Firefox's Xray wrapper.
-//
-// The send logic is inlined here (rather than delegating to window.__lorcaSend)
-// so that the binding function itself contains no references to sandbox-realm
-// function objects.  window.__lorcaWS.send() and window.__lorcaQueue.push()
-// are method calls on Xray-wrapped objects, which Firefox permits.
+// bindingScript returns the JS that installs window[name] as a relay-backed function.
+// Send logic is inlined (not delegated to window.__lorcaSend) so the function holds no
+// sandbox-realm references; Firefox Xray allows method calls on sandbox objects but
+// throws "Permission denied to access property 'length'" when page code sees sandbox functions.
 func bindingScript(name string) string {
 	body := `var args = Array.prototype.slice.call(arguments); ` +
 		`var seq = (window['` + name + `']._seq = (window['` + name + `']._seq || 0) + 1); ` +
@@ -35,41 +24,16 @@ func bindingScript(name string) string {
 		`var _m = JSON.stringify({name: '` + name + `', seq: seq, args: args}); ` +
 		`if (window.__lorcaOpen) { window.__lorcaWS.send(_m); } else { window.__lorcaQueue.push(_m); } ` +
 		`});`
-	// Wrap in an IIFE that captures and preserves the current _seq counter.
-	// When the binding script is re-evaluated (e.g. by the post-load re-eval
-	// in firefox.go), creating a new function object would reset _seq to 0.
-	// If a call is still in-flight at seq=N and a new call also gets seq=N
-	// after the reset, the new call overwrites the old pending entry in
-	// __lorcaPending - the old Promise never resolves, Vue reads null.
-	// Preserving _seq ensures new calls continue from the current counter.
+	// IIFE preserves _seq across re-evals so in-flight calls are not orphaned.
 	return `(function() { var _s = (window['` + name + `'] && window['` + name + `']._seq) || 0; ` +
 		`window['` + name + `'] = function() { ` + body + ` }; ` +
 		`window['` + name + `']._seq = _s; })()`
 }
 
-// bootstrapTemplate is the JS code injected into every page to set up the
-// relay WebSocket and the lorca messaging primitives.
-//
-// For the Firefox preload path (script.addPreloadScript in firefox.go) this
-// template runs in the BiDi preload sandbox realm.  All objects created here
-// are sandbox-realm objects accessible from page realm via Xray wrappers.
-//
-// IMPORTANT: window.__lorcaSend has been intentionally removed.  On Firefox,
-// the Xray wrapper allows METHOD CALLS on sandbox-realm objects (e.g.
-// window.__lorcaWS.send(), window.__lorcaQueue.push()) but throws
-// "Permission denied to access property 'length'" when page-realm code
-// introspects a sandbox-realm FUNCTION object.  bindingScript() inlines the
-// send logic to avoid any reference to a sandbox-realm function, using only
-// allowed method calls through Xray.
-//
-// window.__lorcaWS, __lorcaPending, __lorcaQueue, __lorcaOpen are all
-// non-function objects/primitives - Vue's reactivity system only checks
-// .length on typeof-function values, so these are safe as sandbox-realm.
-//
-// __lorcaSetupWS is a local function (not on window) that initialises a fresh
-// WebSocket connection and wires all its handlers.  Keeping it in the IIFE
-// scope rather than on window avoids Xray length-introspection issues on
-// Firefox while still being reachable by the onclose reconnect closure.
+// bootstrapTemplate sets up the relay WebSocket and lorca messaging primitives.
+// window.__lorcaSend is intentionally absent: Firefox Xray allows method calls on
+// sandbox objects but throws on function .length access. __lorcaSetupWS is kept
+// in IIFE scope (not on window) for the same reason.
 const bootstrapTemplate = `(function() {
   var _proto = window.location && window.location.protocol
   if (_proto && _proto !== 'http:' && _proto !== 'https:' && _proto !== 'data:') { return }
@@ -128,10 +92,8 @@ func (r *relay) bootstrapScript() string {
 	return strings.ReplaceAll(bootstrapTemplate, "__RELAY_PORT__", fmt.Sprintf("%d", r.port))
 }
 
-// bind registers name → f. If name already exists, only the handler is
-// updated (no register message is sent - a second register would reset the
-// JS-side seq counter). Metadata is updated under mu (short hold); the
-// register write uses writeMu so it does not block result goroutines.
+// bind registers name -> f. Re-registering an existing name only updates the handler
+// (no register message; a second register would reset the JS-side seq counter).
 func (r *relay) bind(name string, f bindingFunc) error {
 	r.mu.Lock()
 	_, exists := r.bindings[name]
@@ -154,9 +116,6 @@ func (r *relay) bind(name string, f bindingFunc) error {
 }
 
 func (r *relay) handleClient(ws *websocket.Conn) {
-	// Swap in new client under the short metadata lock and snapshot the name
-	// list. bind() only appends names for brand-new bindings, so any name in
-	// the snapshot is unique - no duplicate registers can race.
 	r.mu.Lock()
 	old := r.client
 	r.client = ws
@@ -166,8 +125,6 @@ func (r *relay) handleClient(ws *websocket.Conn) {
 
 	log.Printf("lorca/relay: page connected, replaying %d binding(s)", len(names))
 
-	// Replay registrations under the write lock so result goroutines cannot
-	// interleave sends with the registration burst.
 	r.writeMu.Lock()
 	for _, name := range names {
 		if err := websocket.JSON.Send(ws, map[string]string{"type": "register", "name": name}); err != nil {
@@ -224,34 +181,24 @@ func (r *relay) handleClient(ws *websocket.Conn) {
 				raw := json.RawMessage(b)
 				msg.Result = &raw
 			}
-			// Marshal the full envelope outside the write lock. For large results
-			// the expensive json.Marshal(res) above already built the payload; this
-			// step only wraps it, but keeping allocations outside writeMu means the
-			// lock is held only for the actual network write.
 			msgBytes, marshalErr := json.Marshal(msg)
 			if marshalErr != nil {
 				log.Printf("lorca/relay: marshal envelope error for %s seq=%d: %v", name, seq, marshalErr)
 				return
 			}
-			// Snapshot the active client under the short metadata lock.
 			r.mu.Lock()
 			client := r.client
 			r.mu.Unlock()
 			if client != ws {
-				// Result for a navigated-away page - discard.
-				return
+				return // result for a navigated-away page
 			}
-			// Acquire the write lock. defer ensures the mutex is released even if
-			// the Send call below panics, preventing a permanent deadlock.
 			r.writeMu.Lock()
 			defer r.writeMu.Unlock()
-			// Re-verify the client under mu in case it changed while we waited.
+			// Re-verify client under mu in case it changed while waiting for writeMu.
 			r.mu.Lock()
 			active := r.client == ws
 			r.mu.Unlock()
 			if active {
-				// Message.Send sends pre-marshaled bytes as a text frame, avoiding a
-				// redundant json.Marshal inside the write lock.
 				if err := websocket.Message.Send(client, string(msgBytes)); err != nil {
 					log.Printf("lorca/relay: send error for %s seq=%d: %v", name, seq, err)
 					client.Close()

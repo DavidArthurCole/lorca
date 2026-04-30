@@ -11,24 +11,9 @@ import (
 // executable file.
 var ChromeExecutable = LocateChrome
 
-var _foundPaths = []string{}
-
-func FoundPaths() []string {
-	if len(_foundPaths) == 0 {
-		LocateChrome("")
-	}
-	return _foundPaths
-}
-
-func RefreshFoundPaths() {
-	_foundPaths = []string{}
-	LocateChrome("")
-}
-
 // LocateChrome returns a path to the Chrome binary, or an empty string if
 // Chrome installation is not found.
 func LocateChrome(preferPath string) string {
-
 	// If preferPath is specified and it exists
 	if preferPath != "" {
 		if _, err := os.Stat(preferPath); err == nil {
@@ -43,10 +28,52 @@ func LocateChrome(preferPath string) string {
 		}
 	}
 
-	var paths []string
+	for _, path := range platformBrowserPaths() {
+		if _, err := os.Stat(path); err == nil {
+			return path
+		}
+	}
+	return ""
+}
+
+// FindAllBrowsers returns paths to all browser executables found on the system.
+// preferPath is checked first; LORCACHROME env var second; then all platform paths.
+// The first entry, if any, is the recommended default (same selection as LocateChrome).
+func FindAllBrowsers(preferPath string) []string {
+	var result []string
+	seen := map[string]bool{}
+
+	add := func(p string) {
+		if p != "" && !seen[p] {
+			seen[p] = true
+			result = append(result, p)
+		}
+	}
+
+	if preferPath != "" {
+		if _, err := os.Stat(preferPath); err == nil {
+			add(preferPath)
+		}
+	}
+	if path, ok := os.LookupEnv("LORCACHROME"); ok {
+		if _, err := os.Stat(path); err == nil {
+			add(path)
+		}
+	}
+	for _, path := range platformBrowserPaths() {
+		if _, err := os.Stat(path); err == nil {
+			add(path)
+		}
+	}
+	return result
+}
+
+// platformBrowserPaths returns the ordered list of well-known browser paths for
+// the current OS.
+func platformBrowserPaths() []string {
 	switch runtime.GOOS {
 	case "darwin":
-		paths = []string{
+		return []string{
 			//Chrome
 			"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
 			"/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
@@ -68,7 +95,7 @@ func LocateChrome(preferPath string) string {
 			"/Applications/Firefox Developer Edition.app/Contents/MacOS/firefox",
 		}
 	case "windows":
-		paths = []string{
+		return []string{
 			//Chrome
 			os.Getenv("LocalAppData") + "/Google/Chrome/Application/chrome.exe",
 			os.Getenv("ProgramFiles") + "/Google/Chrome/Application/chrome.exe",
@@ -96,7 +123,7 @@ func LocateChrome(preferPath string) string {
 			os.Getenv("ProgramFiles(x86)") + "/Mozilla Firefox/firefox.exe",
 		}
 	default:
-		paths = []string{
+		return []string{
 			// Chrome / Chromium
 			"/usr/bin/google-chrome-stable",
 			"/usr/bin/google-chrome",
@@ -123,21 +150,6 @@ func LocateChrome(preferPath string) string {
 			"/snap/bin/firefox",
 		}
 	}
-
-	foundPath := ""
-	for _, path := range paths {
-		if _, err := os.Stat(path); os.IsNotExist(err) {
-			continue
-		}
-		if foundPath == "" {
-			foundPath = path
-			_foundPaths = append(_foundPaths, path)
-		} else {
-			_foundPaths = append(_foundPaths, path)
-		}
-	}
-
-	return foundPath
 }
 
 // LocateFirefox returns a path to a Firefox binary, or an empty string if
